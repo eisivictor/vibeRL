@@ -1,0 +1,482 @@
+import yfinance as yf
+import pandas as pd
+import matplotlib.pyplot as plt
+from stable_baselines3 import PPO
+from sb3_contrib import RecurrentPPO
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from stock_env import StockTradingEnv
+import os
+import json
+import numpy as np
+from datetime import datetime, timedelta
+
+def download_data(ticker, start_date, end_date):
+    data = yf.download(ticker, start=start_date, end=end_date)
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+    data = data.reset_index()
+    data = data.dropna()
+    return data
+
+def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=False, trace=False, _user_provided_dates=None, allow_norm_mismatch=False, initial_balance=None):
+    # Load configuration
+    if not os.path.exists(config_path):
+        print(f"Config file not found: {config_path}")
+        return
+
+    with open(config_path, "r") as f:
+        config = json.load(f)
+    
+    window_size = config.get("window_size", 5)
+    sma_length = config.get("sma_length", 50)
+    long_only = config.get("long_only", False)
+    trading_fee = config.get("trading_fee", 0.0001)
+    model_name = config.get("model_name", "ppo_stock_trader")
+    stats_filename = config.get("normalization_stats")
+    
+    # Use provided budget, or load from config, or default to 10000
+    if initial_balance is None:
+        initial_balance = config.get("initial_balance", 10000)
+    
+    print(f"Testing with initial balance: ${initial_balance:,.2f}")
+    
+    ticker = config.get("training_data", {}).get("ticker", "AAPL")
+    
+    market_ticker = config.get("training_data", {}).get("market_ticker")
+    market_tickers = config.get("training_data", {}).get("market_tickers")
+    
+    # Backward compatibility
+    if market_tickers is None and market_ticker:
+        market_tickers = [market_ticker]
+    
+    print(f"Loading model '{model_name}' with window_size={window_size} from config...")
+    if stochastic:
+        print("Running in STOCHASTIC mode (exploration enabled).")
+    else:
+        print("Running in DETERMINISTIC mode.")
+
+    # 1. Validate normalization requirements
+    # Check that normalization period exists in config
+    normalization_period = config.get("normalization_period")
+    if not normalization_period:
+        raise ValueError(
+            "ERROR: Normalization period not found in config.\n"
+            "Please run 'python main.py normalize --config <config> --norm_start_date <date> --norm_end_date <date>' first."
+        )
+    
+    norm_start = normalization_period.get("start_date")
+    norm_end = normalization_period.get("end_date")
+    
+    if not norm_start or not norm_end:
+        raise ValueError(
+            "ERROR: Incomplete normalization period in config.\n"
+            "Please run 'python main.py normalize --config <config> --norm_start_date <date> --norm_end_date <date>' first."
+        )
+    
+    # Set default dates if not provided, but constrain to normalization period
+    norm_start_dt = datetime.strptime(norm_start, "%Y-%m-%d")
+    norm_end_dt = datetime.strptime(norm_end, "%Y-%m-%d")
+    
+    if end_date is None:
+        # Default to normalization end date (or today if earlier)
+        today = datetime.now()
+        end_date = min(today, norm_end_dt).strftime("%Y-%m-%d")
+    
+    if start_date is None:
+        # Default to 365 days before end_date, but not before normalization start
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+        default_start = end_dt - timedelta(days=365)
+        start_date = max(default_start, norm_start_dt).strftime("%Y-%m-%d")
+    
+    print(f"Available normalization period: {norm_start} to {norm_end}")
+    if _user_provided_dates is False:
+        print(f"Using default test period: {start_date} to {end_date}")
+    
+    # Check that normalization vector exists
+    stats_path = os.path.join("models", f"{model_name}_vecnormalize.pkl")
+    if not os.path.exists(stats_path):
+        raise ValueError(
+            f"ERROR: Normalization vector not found at {stats_path}\n"
+            "Please run 'python main.py normalize --config <config> --norm_start_date <date> --norm_end_date <date>' first."
+        )
+    
+    # Validate that test period is within normalization period
+    test_start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    test_end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+
+    if test_start_dt < norm_start_dt or test_end_dt > norm_end_dt:
+        if allow_norm_mismatch:
+            print(f"⚠ WARNING: Test period ({start_date} to {end_date}) is outside normalization period ({norm_start} to {norm_end}).")
+            print(f"  This may cause distribution shift and unpredictable behavior.")
+            print(f"  Proceeding anyway due to --allow_norm_mismatch flag.")
+        else:
+            raise ValueError(
+                f"ERROR: Test period ({start_date} to {end_date}) must be contained within normalization period ({norm_start} to {norm_end}).\n"
+                f"Test start is {'before' if test_start_dt < norm_start_dt else 'after'} normalization start.\n"
+                f"Test end is {'after' if test_end_dt > norm_end_dt else 'before'} normalization end.\n\n"
+                f"Solutions:\n"
+                f"  1. Specify test dates within normalization period:\n"
+                f"     python main.py test --config {config_path} --start_date {norm_start} --end_date {norm_end}\n"
+                f"  2. Regenerate normalization with wider period:\n"
+                f"     python main.py normalize --config {config_path} --norm_start_date <start> --norm_end_date <end>\n"
+                f"  3. Allow mismatch (may cause distribution shift):\n"
+                f"     python main.py test --config {config_path} --allow_norm_mismatch"
+            )
+    
+    print(f"✓ Normalization validation passed:")
+    print(f"  - Normalization period: {norm_start} to {norm_end}")
+    print(f"  - Test period: {start_date} to {end_date}")
+    print(f"  - Normalization vector: {stats_path}")
+    
+    # 2. Download test period data only
+    print(f"\n--- Downloading Test Data ---")
+    print(f"Downloading {ticker} from {start_date} to {end_date}...")
+    df = download_data(ticker, start_date, end_date)
+    print(f"Downloaded {len(df)} rows for {ticker}")
+    
+    market_dfs = []
+    if market_tickers:
+        for mt in market_tickers:
+            print(f"Downloading market data {mt} from {start_date} to {end_date}...")
+            try:
+                m_df = download_data(mt, start_date, end_date)
+                print(f"Downloaded {len(m_df)} rows for {mt}")
+                market_dfs.append(m_df)
+            except Exception as e:
+                print(f"Error downloading {mt}: {e}")
+        
+        # Align dataframes on Date
+        common_dates = df['Date']
+        for m_df in market_dfs:
+            common_dates = common_dates[common_dates.isin(m_df['Date'])]
+        
+        df = df[df['Date'].isin(common_dates)].reset_index(drop=True)
+        aligned_market_dfs = []
+        for m_df in market_dfs:
+            aligned_market_dfs.append(m_df[m_df['Date'].isin(df['Date'])].reset_index(drop=True))
+        market_dfs = aligned_market_dfs
+        
+        print(f"Aligned test data shape: {df.shape}")
+        for i, m_df in enumerate(market_dfs):
+            print(f"Aligned test market data {market_tickers[i]} shape: {m_df.shape}")
+
+    # 3. Create Test Environment and Load Pre-generated Normalization
+    print(f"\n--- Loading Pre-generated Normalization Stats ---")
+    print(f"Normalization period: {norm_start} to {norm_end}")
+    print(f"Loading frozen stats from {stats_path}...")
+    
+    # Create test environment with custom initial balance
+    test_env_raw = DummyVecEnv([lambda: StockTradingEnv(df, window_size=window_size, market_dfs=market_dfs, sma_length=sma_length, long_only=long_only, trading_fee_pct=trading_fee, initial_balance=initial_balance)])
+    
+    # Load the pre-generated normalization stats with error handling
+    try:
+        env = VecNormalize.load(stats_path, test_env_raw)
+    except AssertionError as e:
+        if "spaces must have the same shape" in str(e):
+            # Extract shapes from error message
+            raise ValueError(
+                f"ERROR: Normalization vector shape mismatch!\n"
+                f"{str(e)}\n\n"
+                f"This happens when environment parameters changed after normalization was generated.\n"
+                f"The normalization vector was created with different parameters than the current environment.\n\n"
+                f"Solution: Regenerate normalization vector with current config parameters:\n"
+                f"  python main.py normalize --config {config_path} \\\n"
+                f"    --norm_start_date {norm_start} --norm_end_date {norm_end}"
+            )
+        else:
+            raise
+    
+    # CRITICAL: Freeze observation stats (no updates during testing)
+    env.training = False
+    env.norm_reward = False
+    
+    print(f"✓ Loaded normalization stats (FROZEN). Obs Mean (first 5): {env.obs_rms.mean[:5]}")
+    print(f"✓ Loaded normalization stats (FROZEN). Obs Var (first 5): {env.obs_rms.var[:5]}")
+    print("-------------------------------------------\n")
+
+    # 4. Load Model
+    model_path = os.path.join("models", model_name)
+    
+    if not os.path.exists(model_path + ".zip"):
+        print(f"Model not found at {model_path}.zip. Please train first.")
+        return
+
+    # Check algorithm in metadata if available
+    algorithm = config.get("algorithm", "PPO")
+    
+    if algorithm == "RecurrentPPO":
+        print("Loading RecurrentPPO (LSTM) model...")
+        model = RecurrentPPO.load(model_path + ".zip")
+    else:
+        print("Loading PPO model...")
+        model = PPO.load(model_path + ".zip")
+
+    obs = env.reset()
+    
+    # LSTM states
+    lstm_states = None
+    num_envs = 1
+    # Episode start signals are used to reset the hidden state when the episode ends.
+    # For testing, we start with True and let the environment control resets via done signal.
+    episode_starts = np.ones((num_envs,), dtype=bool)
+    
+    done = False
+    buy_steps = []
+    sell_steps = []
+    short_steps = []
+    cover_steps = []
+    prices = []
+    dates = []
+    
+    # Initialize net_worth_history with initial state
+    initial_net_worth = env.get_attr("net_worth")[0]
+    net_worth_history = [initial_net_worth]
+    
+    step_counter = 0
+    action_log = []
+    trace_data = []
+    
+    # Access the inner environment to get attributes like current_step, net_worth, etc.
+    # We will use get_attr to ensure we get the latest values from the running env
+    
+    while not done:
+        # Record price before action
+        # We need to get current_step from the env
+        current_step_idx = env.get_attr("current_step")[0]
+        
+        current_price = df.iloc[current_step_idx]['Close']
+        current_date = df.iloc[current_step_idx]['Date']
+        
+        prices.append(current_price)
+        dates.append(current_date)
+        
+        if algorithm == "RecurrentPPO":
+            action, lstm_states = model.predict(obs, state=lstm_states, episode_start=episode_starts, deterministic=not stochastic)
+            # After first step, set episode_starts to False so LSTM maintains state within the episode
+            episode_starts = np.zeros((num_envs,), dtype=bool)
+        else:
+            action, _states = model.predict(obs, deterministic=not stochastic)
+            
+        action_val = float(action[0])
+        
+        # If long_only, map action from [-1, 1] to [0, 1] for display
+        if long_only:
+            action_val = (action_val + 1) / 2
+        
+        # Get shares before step
+        prev_shares = env.get_attr("shares_held")[0]
+        prev_balance = env.get_attr("balance")[0]
+        prev_net_worth = env.get_attr("net_worth")[0]
+        
+        if trace:
+            trace_data.append({
+                'Date': current_date,
+                'Price': current_price,
+                'Action_Target_Weight': action_val,
+                'Shares_Held': prev_shares,
+                'Balance': prev_balance,
+                'Net_Worth': prev_net_worth
+            })
+        
+        # VecEnv step returns 4 values: obs, rewards, dones, infos
+        obs, reward, dones, info = env.step(action)
+        
+        # VecNormalize returns done as an array for VecEnv
+        done = dones[0]
+        # episode_starts is set to dones, which will be True only at episode boundaries
+        # This correctly resets LSTM states when the environment naturally ends an episode
+        episode_starts = dones
+        
+        # Handle Net Worth tracking (VecEnv auto-resets on done)
+        if done:
+            # info[0] contains the state of the last step before reset
+            current_net_worth = info[0]['net_worth']
+            # On episode end, we closed all positions - get final state from info
+            # The environment has auto-liquidated all positions
+            current_balance = current_net_worth  # All converted to cash
+            current_shares = 0
+        else:
+            current_shares = env.get_attr("shares_held")[0]
+            current_balance = env.get_attr("balance")[0]
+            current_net_worth = env.get_attr("net_worth")[0]
+            
+        net_worth_history.append(current_net_worth)
+        
+        # Log trades based on share change
+        shares_change = current_shares - prev_shares
+        if shares_change > 0: # Buy or Cover
+            if prev_shares < 0:
+                cover_steps.append(step_counter)
+                log_entry = f"{current_date.date()}: COVER {shares_change} shares (Target: {action_val:.2f}) at ${current_price:.2f} | Held: {current_shares:.2f} | Balance: ${current_balance:.2f} | Net Worth: ${current_net_worth:.2f}"
+            else:
+                buy_steps.append(step_counter)
+                log_entry = f"{current_date.date()}: BUY  {shares_change} shares (Target: {action_val:.2f}) at ${current_price:.2f} | Held: {current_shares:.2f} | Balance: ${current_balance:.2f} | Net Worth: ${current_net_worth:.2f}"
+            action_log.append(log_entry)
+        elif shares_change < 0: # Sell or Short
+            if prev_shares <= 0:
+                short_steps.append(step_counter)
+                log_entry = f"{current_date.date()}: SHORT {abs(shares_change)} shares (Target: {action_val:.2f}) at ${current_price:.2f} | Held: {current_shares:.2f} | Balance: ${current_balance:.2f} | Net Worth: ${current_net_worth:.2f}"
+            else:
+                sell_steps.append(step_counter)
+                log_entry = f"{current_date.date()}: SELL {abs(shares_change)} shares (Target: {action_val:.2f}) at ${current_price:.2f} | Held: {current_shares:.2f} | Balance: ${current_balance:.2f} | Net Worth: ${current_net_worth:.2f}"
+            action_log.append(log_entry)
+            
+        step_counter += 1
+
+    # 4. Plot Results
+    # Retrieve the full history from the environment
+    # net_worth_history is now tracked manually
+    
+    # --- Buy and Hold Calculation for comparison ---
+    buy_and_hold_net_worths = []
+    if not df.empty and len(prices) > 0:
+        initial_balance_for_bh = env.get_attr("initial_balance")[0]
+        # Find the price at the first date the agent started trading
+        first_agent_trade_date = dates[0]
+        first_price_row = df[df['Date'] == first_agent_trade_date]
+        if not first_price_row.empty:
+            first_price = first_price_row.iloc[0]['Close']
+            shares_to_buy = initial_balance_for_bh / first_price
+            
+            # Calculate B&H net worth for the dates the agent was active
+            bh_df = df[df['Date'].isin(dates)]
+            buy_and_hold_net_worths = (bh_df['Close'] * shares_to_buy).tolist()
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+    
+    # Plot Price and Markers
+    ax1.plot(dates, prices, label='Stock Price', color='blue', alpha=0.6)
+    
+    # Filter steps that are within range of prices
+    buy_steps = [s for s in buy_steps if s < len(prices)]
+    sell_steps = [s for s in sell_steps if s < len(prices)]
+    short_steps = [s for s in short_steps if s < len(prices)]
+    cover_steps = [s for s in cover_steps if s < len(prices)]
+    
+    buy_prices = [prices[i] for i in buy_steps]
+    sell_prices = [prices[i] for i in sell_steps]
+    short_prices = [prices[i] for i in short_steps]
+    cover_prices = [prices[i] for i in cover_steps]
+    
+    buy_dates = [dates[i] for i in buy_steps]
+    sell_dates = [dates[i] for i in sell_steps]
+    short_dates = [dates[i] for i in short_steps]
+    cover_dates = [dates[i] for i in cover_steps]
+    
+    if buy_dates:
+        ax1.scatter(buy_dates, buy_prices, marker='^', color='green', s=100, label='Buy', zorder=5)
+    if sell_dates:
+        ax1.scatter(sell_dates, sell_prices, marker='v', color='red', s=100, label='Sell', zorder=5)
+    if short_dates:
+        ax1.scatter(short_dates, short_prices, marker='v', color='orange', s=100, label='Short', zorder=5)
+    if cover_dates:
+        ax1.scatter(cover_dates, cover_prices, marker='^', color='purple', s=100, label='Cover', zorder=5)
+    
+    ax1.set_title(f'Trading Actions on {ticker}')
+    ax1.set_ylabel('Price ($)')
+    ax1.legend()
+    ax1.grid(True)
+    
+    # Plot Net Worth
+    # Align lengths
+    if len(net_worth_history) > len(dates):
+        net_worth_history = net_worth_history[-len(dates):]
+    elif len(net_worth_history) < len(dates):
+        dates = dates[:len(net_worth_history)]
+        
+    ax2.plot(dates, net_worth_history, label='Agent Net Worth', color='orange')
+    
+    # Plot Buy & Hold if available
+    if buy_and_hold_net_worths and len(buy_and_hold_net_worths) == len(dates):
+        ax2.plot(dates, buy_and_hold_net_worths, label='Buy & Hold Net Worth', color='grey', linestyle='--')
+        
+    ax2.set_title('Net Worth Over Time')
+    ax2.set_xlabel('Date')
+    ax2.set_ylabel('Net Worth ($)')
+    ax2.legend()
+    ax2.grid(True)
+    
+    fig.autofmt_xdate()
+    
+    plt.tight_layout()
+    plt.savefig('performance.png')
+    print("Performance plot saved to performance.png")
+    
+    # Write log file
+    # Use the last recorded net worth from our history, as the env might have reset
+    final_net_worth = net_worth_history[-1]
+    initial_balance = env.get_attr("initial_balance")[0]
+    
+    # Get final shares held (if test didn't terminate with reset)
+    if not done or step_counter > 0:
+        final_shares = current_shares
+    else:
+        final_shares = 0
+
+    with open("performance.log", "w") as f:
+        f.write(f"Performance Log for {ticker}\n")
+        f.write(f"Model: {model_name}\n")
+        f.write(f"Period: {start_date} to {end_date}\n")
+        f.write("-" * 80 + "\n")
+        for line in action_log:
+            f.write(line + "\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"Agent Final Net Worth: ${final_net_worth:.2f}\n")
+        f.write(f"Agent Final Balance: ${current_balance:.2f}\n")
+        f.write(f"Agent Final Shares Held: {final_shares:.2f}\n")
+        f.write(f"Agent Profit/Loss: ${final_net_worth - initial_balance:.2f}\n")
+        f.write(f"Agent Return: {((final_net_worth / initial_balance - 1) * 100):.2f}%\n")
+        
+        # Add Buy and Hold summary
+        if buy_and_hold_net_worths:
+            final_bh_net_worth = buy_and_hold_net_worths[-1]
+            f.write("-" * 80 + "\n")
+            f.write(f"Buy & Hold Final Net Worth: ${final_bh_net_worth:.2f}\n")
+            f.write(f"Buy & Hold Profit/Loss: ${final_bh_net_worth - initial_balance:.2f}\n")
+            f.write(f"Buy & Hold Return: {((final_bh_net_worth / initial_balance - 1) * 100):.2f}%\n")
+            f.write("-" * 80 + "\n")
+            outperformance = final_net_worth - final_bh_net_worth
+            f.write(f"Agent vs Buy & Hold: ${outperformance:.2f} ({'outperformed' if outperformance > 0 else 'underperformed'})\n")
+        
+    print("Performance log saved to performance.log")
+    print(f"Final Net Worth: ${final_net_worth:.2f}")
+    
+    if trace:
+        trace_filename = f"trace_{model_name}.csv"
+        trace_df = pd.DataFrame(trace_data)
+        trace_df.to_csv(trace_filename, index=False)
+        print(f"Trace log saved to {trace_filename}")
+
+def inspect_model(config_path):
+    # Load configuration
+    if not os.path.exists(config_path):
+        print(f"Config file not found: {config_path}")
+        return
+
+    with open(config_path, "r") as f:
+        config = json.load(f)
+    
+    model_name = config.get("model_name", "ppo_stock_trader")
+    algorithm = config.get("algorithm", "PPO")
+    
+    model_path = os.path.join("models", model_name)
+    
+    if not os.path.exists(model_path + ".zip"):
+        print(f"Model not found at {model_path}.zip. Please train first.")
+        return
+
+    print(f"Inspecting model '{model_name}'...")
+    
+    if algorithm == "RecurrentPPO":
+        print("Loading RecurrentPPO (LSTM) model...")
+        # We can load without env for inspection
+        model = RecurrentPPO.load(model_path + ".zip")
+    else:
+        print("Loading PPO model...")
+        model = PPO.load(model_path + ".zip")
+        
+    print("\nModel Policy Architecture:")
+    print(model.policy)
+
+if __name__ == "__main__":
+    test()

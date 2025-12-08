@@ -1,0 +1,25 @@
+{
+    "model_name": "XOM_real",
+    "window_size": 20,
+    "sma_length": 50,
+    "long_only": true,
+    "algorithm": "RecurrentPPO",
+    "reward_metric": "profit",
+    "ent_coef": 0.1,
+    "trading_fee": 0.001,
+    "total_timesteps": 0,
+    "training_data": {
+        "ticker": "XOM",
+        "market_tickers": [
+            "^GSPC",
+            "^DJI",
+            "^VIX"
+        ],
+        "start_date": "2025-04-01",
+        "end_date": "2025-11-20"
+    },
+    "normalization_period": {
+        "start_date": "2025-03-01",
+        "end_date": "2025-12-08"
+    }
+}
