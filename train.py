@@ -128,6 +128,7 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
     print(f"✓ Normalization validation passed:")
     print(f"  - Normalization period: {normalization_start_date} to {normalization_end_date}")
     print(f"  - Training period: {start_date} to {end_date}")
+    print(f"  - Initial balance/budget: ${initial_balance:,.2f}")
     print(f"  - Normalization vector: {stats_path}")
     
     # 2. Prepare Data

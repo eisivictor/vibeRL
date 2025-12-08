@@ -4,10 +4,12 @@
     "sma_length": 50,
     "long_only": true,
     "algorithm": "RecurrentPPO",
+    "normalization_stats": "XOM_real_vecnormalize.pkl",
     "reward_metric": "profit",
     "ent_coef": 0.1,
     "trading_fee": 0.001,
-    "total_timesteps": 0,
+    "initial_balance": 3000.0,
+    "total_timesteps": 10000,
     "training_data": {
         "ticker": "XOM",
         "market_tickers": [
