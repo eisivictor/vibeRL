@@ -295,10 +295,13 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
             # The environment has auto-liquidated all positions
             current_balance = current_net_worth  # All converted to cash
             current_shares = 0
+            # Mark this as a forced liquidation, not an agent decision
+            is_forced_liquidation = True
         else:
             current_shares = env.get_attr("shares_held")[0]
             current_balance = env.get_attr("balance")[0]
             current_net_worth = env.get_attr("net_worth")[0]
+            is_forced_liquidation = False
             
         net_worth_history.append(current_net_worth)
         
@@ -313,13 +316,18 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
                 log_entry = f"{current_date.date()}: BUY  {shares_change} shares (Target: {action_val:.2f}) at ${current_price:.2f} | Held: {current_shares:.2f} | Balance: ${current_balance:.2f} | Net Worth: ${current_net_worth:.2f}"
             action_log.append(log_entry)
         elif shares_change < 0: # Sell or Short
-            if prev_shares <= 0:
+            if is_forced_liquidation:
+                # Don't log or plot forced liquidation - it's not an agent decision
+                # No sell_steps.append() and no log entry added
+                pass
+            elif prev_shares <= 0:
                 short_steps.append(step_counter)
                 log_entry = f"{current_date.date()}: SHORT {abs(shares_change)} shares (Target: {action_val:.2f}) at ${current_price:.2f} | Held: {current_shares:.2f} | Balance: ${current_balance:.2f} | Net Worth: ${current_net_worth:.2f}"
+                action_log.append(log_entry)
             else:
                 sell_steps.append(step_counter)
                 log_entry = f"{current_date.date()}: SELL {abs(shares_change)} shares (Target: {action_val:.2f}) at ${current_price:.2f} | Held: {current_shares:.2f} | Balance: ${current_balance:.2f} | Net Worth: ${current_net_worth:.2f}"
-            action_log.append(log_entry)
+                action_log.append(log_entry)
             
         step_counter += 1
 
