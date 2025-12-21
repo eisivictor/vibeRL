@@ -31,6 +31,8 @@ def main():
     parser.add_argument('--norm_warmup_steps', type=int, default=None, help="Number of warmup steps for normalization stats (default: min(data_length * 2, 5000))")
     parser.add_argument('--allow_norm_mismatch', action='store_true', help="Allow testing on dates outside normalization period (may cause distribution shift)")
     parser.add_argument('--budget', type=float, default=None, help="Initial balance/budget for testing (default: 10000)")
+    parser.add_argument('--mark-date', type=str, default=None, help="Draw a vertical line on the chart at this date (YYYY-MM-DD)")
+    parser.add_argument('--plotly', action='store_true', help="Generate interactive Plotly chart (allows zooming) in addition to PNG")
     
     args = parser.parse_args()
     
@@ -40,7 +42,7 @@ def main():
         start_date = args.start_date
         end_date = args.end_date
         continue_training = args.continue_training
-        timesteps = args.timesteps
+        timesteps = args.timesteps  # Will be overridden by config if not explicitly set via CLI
         ticker = args.ticker if args.ticker else "AAPL"
         reward_metric = args.reward_metric
         ent_coef = args.ent_coef
@@ -96,6 +98,9 @@ def main():
                 
                 if "initial_balance" in config and "--budget" not in sys.argv:
                     initial_balance = config["initial_balance"]
+                
+                if "train_timesteps" in config and "--timesteps" not in sys.argv:
+                    timesteps = config["train_timesteps"]
                 
                 # For dates, we might want to keep the CLI args if provided, otherwise use config
                 if start_date is None and "training_data" in config:
@@ -259,7 +264,9 @@ def main():
             trace=args.trace,
             _user_provided_dates=args.start_date is not None or args.end_date is not None,
             allow_norm_mismatch=args.allow_norm_mismatch,
-            initial_balance=args.budget
+            initial_balance=args.budget,
+            mark_date=args.mark_date,
+            use_plotly=args.plotly
         )
     elif args.mode == 'test_s':
         if not args.config:

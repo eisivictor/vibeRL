@@ -11,14 +11,18 @@ import numpy as np
 from datetime import datetime, timedelta
 
 def download_data(ticker, start_date, end_date):
-    data = yf.download(ticker, start=start_date, end=end_date)
+    # yfinance end parameter is exclusive, so add 1 day to include end_date
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+    end_date_inclusive = end_dt.strftime("%Y-%m-%d")
+    
+    data = yf.download(ticker, start=start_date, end=end_date_inclusive)
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.get_level_values(0)
     data = data.reset_index()
     data = data.dropna()
     return data
 
-def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=False, trace=False, _user_provided_dates=None, allow_norm_mismatch=False, initial_balance=None):
+def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=False, trace=False, _user_provided_dates=None, allow_norm_mismatch=False, initial_balance=None, mark_date=None, use_plotly=False):
     # Load configuration
     if not os.path.exists(config_path):
         print(f"Config file not found: {config_path}")
@@ -128,45 +132,68 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
     print(f"  - Test period: {start_date} to {end_date}")
     print(f"  - Normalization vector: {stats_path}")
     
-    # 2. Download test period data only
-    print(f"\n--- Downloading Test Data ---")
-    print(f"Downloading {ticker} from {start_date} to {end_date}...")
-    df = download_data(ticker, start_date, end_date)
-    print(f"Downloaded {len(df)} rows for {ticker}")
+    # 2. Download test period data with sufficient history for indicators
+    # Calculate how much historical data we need before start_date
+    # We need max(window_size, sma_length) + buffer for safety
+    lookback_days = max(window_size, sma_length) + 20  # +20 buffer for weekends/holidays
     
-    market_dfs = []
+    # Calculate extended start date for data download
+    test_start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    download_start_dt = test_start_dt - timedelta(days=lookback_days)
+    download_start = download_start_dt.strftime("%Y-%m-%d")
+    
+    print(f"\n--- Downloading Test Data ---")
+    print(f"Test period: {start_date} to {end_date}")
+    print(f"Downloading from {download_start} (includes {lookback_days}-day lookback for indicators)")
+    print(f"Downloading {ticker} from {download_start} to {end_date}...")
+    df_full = download_data(ticker, download_start, end_date)
+    print(f"Downloaded {len(df_full)} rows for {ticker}")
+    
+    market_dfs_full = []
     if market_tickers:
         for mt in market_tickers:
-            print(f"Downloading market data {mt} from {start_date} to {end_date}...")
+            print(f"Downloading market data {mt} from {download_start} to {end_date}...")
             try:
-                m_df = download_data(mt, start_date, end_date)
+                m_df = download_data(mt, download_start, end_date)
                 print(f"Downloaded {len(m_df)} rows for {mt}")
-                market_dfs.append(m_df)
+                market_dfs_full.append(m_df)
             except Exception as e:
                 print(f"Error downloading {mt}: {e}")
         
         # Align dataframes on Date
-        common_dates = df['Date']
-        for m_df in market_dfs:
+        common_dates = df_full['Date']
+        for m_df in market_dfs_full:
             common_dates = common_dates[common_dates.isin(m_df['Date'])]
         
-        df = df[df['Date'].isin(common_dates)].reset_index(drop=True)
+        df_full = df_full[df_full['Date'].isin(common_dates)].reset_index(drop=True)
         aligned_market_dfs = []
-        for m_df in market_dfs:
-            aligned_market_dfs.append(m_df[m_df['Date'].isin(df['Date'])].reset_index(drop=True))
-        market_dfs = aligned_market_dfs
+        for m_df in market_dfs_full:
+            aligned_market_dfs.append(m_df[m_df['Date'].isin(df_full['Date'])].reset_index(drop=True))
+        market_dfs_full = aligned_market_dfs
         
-        print(f"Aligned test data shape: {df.shape}")
-        for i, m_df in enumerate(market_dfs):
+        print(f"Aligned full data shape: {df_full.shape}")
+        for i, m_df in enumerate(market_dfs_full):
             print(f"Aligned test market data {market_tickers[i]} shape: {m_df.shape}")
+    else:
+        market_dfs_full = []
+    
+    # Find the index where the actual test period starts
+    # Reset df_full index to ensure we can use positional indexing
+    df_full = df_full.reset_index(drop=True)
+    if market_dfs_full:
+        market_dfs_full = [m_df.reset_index(drop=True) for m_df in market_dfs_full]
+    
+    test_start_idx = df_full[df_full['Date'] >= test_start_dt].index[0] if len(df_full[df_full['Date'] >= test_start_dt]) > 0 else 0
+    print(f"Test period starts at row index {test_start_idx} (date: {df_full.iloc[test_start_idx]['Date'].date() if test_start_idx < len(df_full) else 'N/A'})")
 
     # 3. Create Test Environment and Load Pre-generated Normalization
     print(f"\n--- Loading Pre-generated Normalization Stats ---")
     print(f"Normalization period: {norm_start} to {norm_end}")
     print(f"Loading frozen stats from {stats_path}...")
     
-    # Create test environment with custom initial balance
-    test_env_raw = DummyVecEnv([lambda: StockTradingEnv(df, window_size=window_size, market_dfs=market_dfs, sma_length=sma_length, long_only=long_only, trading_fee_pct=trading_fee, initial_balance=initial_balance)])
+    # Create test environment with full data (including lookback period)
+    # Pass start_step to begin trading from the actual test period start
+    test_env_raw = DummyVecEnv([lambda: StockTradingEnv(df_full, window_size=window_size, market_dfs=market_dfs_full, sma_length=sma_length, long_only=long_only, trading_fee_pct=trading_fee, initial_balance=initial_balance, start_step=test_start_idx, trace=trace)])
     
     # Load the pre-generated normalization stats with error handling
     try:
@@ -235,6 +262,7 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
     step_counter = 0
     action_log = []
     trace_data = []
+    normalization_trace = []  # Track normalization statistics
     
     # Access the inner environment to get attributes like current_step, net_worth, etc.
     # We will use get_attr to ensure we get the latest values from the running env
@@ -244,8 +272,8 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
         # We need to get current_step from the env
         current_step_idx = env.get_attr("current_step")[0]
         
-        current_price = df.iloc[current_step_idx]['Close']
-        current_date = df.iloc[current_step_idx]['Date']
+        current_price = df_full.iloc[current_step_idx]['Close']
+        current_date = df_full.iloc[current_step_idx]['Date']
         
         prices.append(current_price)
         dates.append(current_date)
@@ -268,6 +296,44 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
         prev_balance = env.get_attr("balance")[0]
         prev_net_worth = env.get_attr("net_worth")[0]
         
+        # Capture normalization statistics if trace is enabled
+        if trace:
+            # Get raw observation from the environment before normalization
+            raw_obs = test_env_raw.envs[0]._next_observation()
+            
+            # Get normalized observation (what the model sees)
+            normalized_obs = obs[0]
+            
+            # Calculate normalization statistics
+            obs_std = np.sqrt(env.obs_rms.var + env.epsilon)
+            normalized_manual = (raw_obs - env.obs_rms.mean) / obs_std
+            
+            # Store normalization trace data
+            normalization_trace.append({
+                'Date': current_date,
+                'Step': step_counter,
+                'Raw_Balance': raw_obs[0],
+                'Raw_Shares': raw_obs[1],
+                'Raw_Price_Ratio': raw_obs[2],
+                'Norm_Balance': normalized_obs[0],
+                'Norm_Shares': normalized_obs[1],
+                'Norm_Price_Ratio': normalized_obs[2],
+                'Balance_Mean': env.obs_rms.mean[0],
+                'Balance_Std': obs_std[0],
+                'Shares_Mean': env.obs_rms.mean[1],
+                'Shares_Std': obs_std[1],
+                'Price_Ratio_Mean': env.obs_rms.mean[2],
+                'Price_Ratio_Std': obs_std[2],
+                'Raw_Min': np.min(raw_obs),
+                'Raw_Max': np.max(raw_obs),
+                'Raw_Mean': np.mean(raw_obs),
+                'Raw_Std': np.std(raw_obs),
+                'Norm_Min': np.min(normalized_obs),
+                'Norm_Max': np.max(normalized_obs),
+                'Norm_Mean': np.mean(normalized_obs),
+                'Norm_Std': np.std(normalized_obs),
+            })
+        
         if trace:
             trace_data.append({
                 'Date': current_date,
@@ -289,14 +355,14 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
         
         # Handle Net Worth tracking (VecEnv auto-resets on done)
         if done:
+            # CRITICAL: Get the actual state from info before VecEnv auto-reset
             # info[0] contains the state of the last step before reset
             current_net_worth = info[0]['net_worth']
-            # On episode end, we closed all positions - get final state from info
-            # The environment has auto-liquidated all positions
-            current_balance = current_net_worth  # All converted to cash
-            current_shares = 0
-            # Mark this as a forced liquidation, not an agent decision
-            is_forced_liquidation = True
+            # Get actual shares and balance after the trade (from info, not from env which has reset)
+            current_shares = info[0].get('shares_held', 0)
+            current_balance = info[0].get('balance', current_net_worth)
+            # Mark this as episode end, but we'll log the actual trade that happened
+            is_forced_liquidation = False  # Changed: we want to log the actual trade
         else:
             current_shares = env.get_attr("shares_held")[0]
             current_balance = env.get_attr("balance")[0]
@@ -337,17 +403,17 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
     
     # --- Buy and Hold Calculation for comparison ---
     buy_and_hold_net_worths = []
-    if not df.empty and len(prices) > 0:
+    if not df_full.empty and len(prices) > 0:
         initial_balance_for_bh = env.get_attr("initial_balance")[0]
         # Find the price at the first date the agent started trading
         first_agent_trade_date = dates[0]
-        first_price_row = df[df['Date'] == first_agent_trade_date]
+        first_price_row = df_full[df_full['Date'] == first_agent_trade_date]
         if not first_price_row.empty:
             first_price = first_price_row.iloc[0]['Close']
             shares_to_buy = initial_balance_for_bh / first_price
             
             # Calculate B&H net worth for the dates the agent was active
-            bh_df = df[df['Date'].isin(dates)]
+            bh_df = df_full[df_full['Date'].isin(dates)]
             buy_and_hold_net_worths = (bh_df['Close'] * shares_to_buy).tolist()
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
@@ -404,11 +470,137 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
     ax2.legend()
     ax2.grid(True)
     
+    # Draw vertical line at mark_date if specified
+    if mark_date:
+        try:
+            mark_dt = pd.to_datetime(mark_date)
+            # Draw line on both subplots
+            ax1.axvline(x=mark_dt, color='blue', linestyle='--', linewidth=2, label=f'Mark: {mark_date}', alpha=0.7)
+            ax2.axvline(x=mark_dt, color='blue', linestyle='--', linewidth=2, alpha=0.7)
+            # Update legends to include the mark
+            ax1.legend()
+        except Exception as e:
+            print(f"Warning: Could not draw mark at date '{mark_date}': {e}")
+    
     fig.autofmt_xdate()
     
     plt.tight_layout()
     plt.savefig('performance.png')
     print("Performance plot saved to performance.png")
+    
+    # Generate interactive Plotly chart if requested
+    if use_plotly:
+        try:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+            import traceback
+            
+            # Create subplots
+            fig_plotly = make_subplots(
+                rows=2, cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.1,
+                subplot_titles=(f'Trading Actions on {ticker}', 'Net Worth Over Time'),
+                row_heights=[0.5, 0.5]
+            )
+            
+            # Plot 1: Price and Actions
+            fig_plotly.add_trace(
+                go.Scatter(x=dates, y=prices, mode='lines', name='Price', line=dict(color='blue')),
+                row=1, col=1
+            )
+            
+            if buy_dates:
+                fig_plotly.add_trace(
+                    go.Scatter(x=buy_dates, y=buy_prices, mode='markers', name='Buy',
+                               marker=dict(symbol='triangle-up', size=10, color='green')),
+                    row=1, col=1
+                )
+            if sell_dates:
+                fig_plotly.add_trace(
+                    go.Scatter(x=sell_dates, y=sell_prices, mode='markers', name='Sell',
+                               marker=dict(symbol='triangle-down', size=10, color='red')),
+                    row=1, col=1
+                )
+            if short_dates:
+                fig_plotly.add_trace(
+                    go.Scatter(x=short_dates, y=short_prices, mode='markers', name='Short',
+                               marker=dict(symbol='triangle-down', size=10, color='orange')),
+                    row=1, col=1
+                )
+            if cover_dates:
+                fig_plotly.add_trace(
+                    go.Scatter(x=cover_dates, y=cover_prices, mode='markers', name='Cover',
+                               marker=dict(symbol='triangle-up', size=10, color='purple')),
+                    row=1, col=1
+                )
+            
+            # Plot 2: Net Worth
+            fig_plotly.add_trace(
+                go.Scatter(x=dates, y=net_worth_history, mode='lines', name='Agent Net Worth',
+                           line=dict(color='orange')),
+                row=2, col=1
+            )
+            
+            if buy_and_hold_net_worths and len(buy_and_hold_net_worths) == len(dates):
+                fig_plotly.add_trace(
+                    go.Scatter(x=dates, y=buy_and_hold_net_worths, mode='lines',
+                               name='Buy & Hold Net Worth',
+                               line=dict(color='grey', dash='dash')),
+                    row=2, col=1
+                )
+            
+            # Add vertical line at mark_date if specified
+            if mark_date:
+                try:
+                    # Add vertical lines without annotation (Plotly has issues with annotation_text on vlines in subplots)
+                    fig_plotly.add_vline(x=mark_date, line_dash="dash", line_color="blue", 
+                                        line_width=2, opacity=0.7,
+                                        row=1, col=1)
+                    fig_plotly.add_vline(x=mark_date, line_dash="dash", line_color="blue",
+                                        line_width=2, opacity=0.7,
+                                        row=2, col=1)
+                    print(f"✓ Added mark date vertical line at {mark_date} to Plotly chart")
+                except Exception as mark_e:
+                    print(f"Warning: Could not add mark line to Plotly: {mark_e}")
+            
+            # Update layout
+            fig_plotly.update_xaxes(title_text="Date", row=2, col=1)
+            fig_plotly.update_yaxes(title_text="Price ($)", row=1, col=1)
+            fig_plotly.update_yaxes(title_text="Net Worth ($)", row=2, col=1)
+            
+            fig_plotly.update_layout(
+                height=800,
+                showlegend=True,
+                hovermode='x unified',
+                title_text=f"Trading Performance: {ticker}"
+            )
+            
+            # Save and open
+            html_file = 'performance.html'
+            html_path = os.path.abspath(html_file)
+            fig_plotly.write_html(html_path)
+            print(f"Interactive Plotly chart saved to {html_file}")
+            print(f"Full path: {html_path}")
+            
+            # Try to open in browser
+            import webbrowser
+            try:
+                # Try opening with different methods
+                if webbrowser.open(f'file://{html_path}'):
+                    print(f"Opening {html_file} in browser...")
+                else:
+                    print(f"Could not open browser automatically. Please open manually: {html_path}")
+            except Exception as e:
+                print(f"Could not open browser: {e}")
+                print(f"Please open manually: {html_path}")
+            
+        except ImportError:
+            print("Warning: plotly not installed. Install with: pip install plotly")
+        except Exception as e:
+            print(f"Warning: Could not generate Plotly chart: {e}")
+            import traceback
+            traceback.print_exc()
     
     # Write log file
     # Use the last recorded net worth from our history, as the env might have reset
@@ -454,6 +646,38 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
         trace_df = pd.DataFrame(trace_data)
         trace_df.to_csv(trace_filename, index=False)
         print(f"Trace log saved to {trace_filename}")
+        
+        # Save normalization trace
+        if normalization_trace:
+            norm_trace_filename = f"normalization_trace_{model_name}.csv"
+            norm_trace_df = pd.DataFrame(normalization_trace)
+            norm_trace_df.to_csv(norm_trace_filename, index=False)
+            print(f"Normalization trace saved to {norm_trace_filename}")
+            
+            # Print summary statistics
+            print(f"\n--- Normalization Effectiveness Summary ---")
+            print(f"Raw observation statistics:")
+            print(f"  Min: {norm_trace_df['Raw_Min'].min():.4f}, Max: {norm_trace_df['Raw_Max'].max():.4f}")
+            print(f"  Mean range: [{norm_trace_df['Raw_Mean'].min():.4f}, {norm_trace_df['Raw_Mean'].max():.4f}]")
+            print(f"  Std range: [{norm_trace_df['Raw_Std'].min():.4f}, {norm_trace_df['Raw_Std'].max():.4f}]")
+            print(f"Normalized observation statistics:")
+            print(f"  Min: {norm_trace_df['Norm_Min'].min():.4f}, Max: {norm_trace_df['Norm_Max'].max():.4f}")
+            print(f"  Mean range: [{norm_trace_df['Norm_Mean'].min():.4f}, {norm_trace_df['Norm_Mean'].max():.4f}]")
+            print(f"  Std range: [{norm_trace_df['Norm_Std'].min():.4f}, {norm_trace_df['Norm_Std'].max():.4f}]")
+            
+            # Check if normalization is effective (normalized values should be roughly centered around 0 with std ~1)
+            avg_norm_mean = norm_trace_df['Norm_Mean'].mean()
+            avg_norm_std = norm_trace_df['Norm_Std'].mean()
+            print(f"Average normalized mean: {avg_norm_mean:.4f} (should be close to 0)")
+            print(f"Average normalized std: {avg_norm_std:.4f} (should be close to 1)")
+            
+            if abs(avg_norm_mean) > 0.5:
+                print(f"⚠ Warning: Normalized observations have high mean ({avg_norm_mean:.4f}), normalization may not be effective")
+            if avg_norm_std < 0.5 or avg_norm_std > 2.0:
+                print(f"⚠ Warning: Normalized observations have unusual std ({avg_norm_std:.4f}), expected ~1.0")
+            if abs(avg_norm_mean) < 0.1 and 0.8 < avg_norm_std < 1.2:
+                print(f"✓ Normalization appears effective: centered around 0 with unit variance")
+            print("-------------------------------------------\n")
 
 def inspect_model(config_path):
     # Load configuration

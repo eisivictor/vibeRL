@@ -3,6 +3,7 @@ import pandas as pd
 import os
 import json
 import numpy as np
+from datetime import datetime, timedelta
 from stable_baselines3 import PPO
 from sb3_contrib import RecurrentPPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
@@ -77,7 +78,11 @@ class DebugValueCallback(BaseCallback):
         return True
 
 def download_data(ticker, start_date, end_date):
-    data = yf.download(ticker, start=start_date, end=end_date)
+    # yfinance end parameter is exclusive, so add 1 day to include end_date
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+    end_date_inclusive = end_dt.strftime("%Y-%m-%d")
+    
+    data = yf.download(ticker, start=start_date, end=end_date_inclusive)
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.get_level_values(0)
     data = data.reset_index()
@@ -140,37 +145,57 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
     elif market_ticker:
         target_tickers = [market_ticker]
     
-    # Download only training period (normalization already done separately)
-    print(f"\n--- Downloading Training Data ---")
-    print(f"Downloading {ticker} from {start_date} to {end_date}...")
-    df = download_data(ticker, start_date, end_date)
-    print(f"Downloaded {len(df)} rows for {ticker}")
+    # Calculate how much historical data we need before start_date for indicators
+    lookback_days = max(window_size, sma_length) + 20  # +20 buffer for weekends/holidays
     
-    market_dfs = []
+    # Calculate extended start date for data download
+    train_start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    download_start_dt = train_start_dt - timedelta(days=lookback_days)
+    download_start = download_start_dt.strftime("%Y-%m-%d")
+    
+    # Download training data with sufficient history for indicators
+    print(f"\n--- Downloading Training Data ---")
+    print(f"Training period: {start_date} to {end_date}")
+    print(f"Downloading from {download_start} (includes {lookback_days}-day lookback for indicators)")
+    print(f"Downloading {ticker} from {download_start} to {end_date}...")
+    df_full = download_data(ticker, download_start, end_date)
+    print(f"Downloaded {len(df_full)} rows for {ticker}")
+    
+    market_dfs_full = []
     if target_tickers:
         for mt in target_tickers:
-            print(f"Downloading market data {mt} from {start_date} to {end_date}...")
+            print(f"Downloading market data {mt} from {download_start} to {end_date}...")
             try:
-                m_df = download_data(mt, start_date, end_date)
+                m_df = download_data(mt, download_start, end_date)
                 print(f"Downloaded {len(m_df)} rows for {mt}")
-                market_dfs.append(m_df)
+                market_dfs_full.append(m_df)
             except Exception as e:
                 print(f"Error downloading {mt}: {e}")
         
         # Align dataframes on Date
-        common_dates = df['Date']
-        for m_df in market_dfs:
+        common_dates = df_full['Date']
+        for m_df in market_dfs_full:
             common_dates = common_dates[common_dates.isin(m_df['Date'])]
             
-        df = df[df['Date'].isin(common_dates)].reset_index(drop=True)
+        df_full = df_full[df_full['Date'].isin(common_dates)].reset_index(drop=True)
         aligned_market_dfs = []
-        for m_df in market_dfs:
-            aligned_market_dfs.append(m_df[m_df['Date'].isin(df['Date'])].reset_index(drop=True))
-        market_dfs = aligned_market_dfs
+        for m_df in market_dfs_full:
+            aligned_market_dfs.append(m_df[m_df['Date'].isin(df_full['Date'])].reset_index(drop=True))
+        market_dfs_full = aligned_market_dfs
         
-        print(f"Aligned Data shape: {df.shape}")
-        for i, m_df in enumerate(market_dfs):
+        print(f"Aligned full data shape: {df_full.shape}")
+        for i, m_df in enumerate(market_dfs_full):
             print(f"Aligned Market Data {target_tickers[i]} shape: {m_df.shape}")
+    else:
+        market_dfs_full = []
+    
+    # Find the index where the actual training period starts
+    df_full = df_full.reset_index(drop=True)
+    if market_dfs_full:
+        market_dfs_full = [m_df.reset_index(drop=True) for m_df in market_dfs_full]
+    
+    train_start_idx = df_full[df_full['Date'] >= train_start_dt].index[0] if len(df_full[df_full['Date'] >= train_start_dt]) > 0 else 0
+    print(f"Training starts at row index {train_start_idx} (date: {df_full.iloc[train_start_idx]['Date'].date() if train_start_idx < len(df_full) else 'N/A'})")
 
     # 2. Create Environment and Load Pre-generated Normalization
     # Training now REQUIRES pre-generated normalization stats (already validated above)
@@ -179,8 +204,8 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
     print(f"Normalization period: {normalization_start_date} to {normalization_end_date}")
     print(f"Loading frozen stats from {stats_path}...")
     
-    # Create the training environment
-    env = DummyVecEnv([lambda: StockTradingEnv(df, window_size=window_size, market_dfs=market_dfs, reward_metric=reward_metric, sma_length=sma_length, long_only=long_only, trading_fee_pct=trading_fee_pct, trace=trace, initial_balance=initial_balance)])
+    # Create the training environment with full data (including lookback) and start_step
+    env = DummyVecEnv([lambda: StockTradingEnv(df_full, window_size=window_size, market_dfs=market_dfs_full, reward_metric=reward_metric, sma_length=sma_length, long_only=long_only, trading_fee_pct=trading_fee_pct, trace=trace, initial_balance=initial_balance, start_step=train_start_idx)])
     
     # Load the pre-generated normalization stats with error handling
     try:
@@ -217,22 +242,30 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
         
     model_path = os.path.join(models_dir, model_name)
     
+    # Load total timesteps from existing metadata if available
     total_timesteps_so_far = 0
+    metadata_path = custom_metadata_path or os.path.join(models_dir, f"{model_name}_metadata.json")
+    if os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, "r") as f:
+                existing_meta = json.load(f)
+                if "total_timesteps" in existing_meta:
+                    total_timesteps_so_far = existing_meta["total_timesteps"]
+                    print(f"Found existing training history: {total_timesteps_so_far} timesteps completed previously")
+        except Exception as e:
+            print(f"Warning: Could not read existing timesteps from metadata: {e}")
 
     if continue_training and os.path.exists(model_path + ".zip"):
         print(f"Loading existing model from {model_path} to continue training...")
         
         # Load normalization stats if they exist
         # Try to find metadata to get stats filename
-        metadata_path = os.path.join(models_dir, f"{model_name}_metadata.json")
         stats_path = None
         if os.path.exists(metadata_path):
              with open(metadata_path, "r") as f:
                  meta = json.load(f)
                  if "normalization_stats" in meta:
                      stats_path = os.path.join(models_dir, meta["normalization_stats"])
-                 if "total_timesteps" in meta:
-                     total_timesteps_so_far = meta["total_timesteps"]
         
         # Fallback to default name if not in metadata
         if stats_path is None:
@@ -356,6 +389,7 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
         "ent_coef": ent_coef,
         "trading_fee": trading_fee_pct,
         "initial_balance": initial_balance,
+        "train_timesteps": timesteps,
         "total_timesteps": total_timesteps_so_far + timesteps,
         "training_data": {
             "ticker": ticker,

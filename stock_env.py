@@ -9,7 +9,7 @@ class StockTradingEnv(gym.Env):
     """A stock trading environment for Gymnasium"""
     metadata = {'render_modes': ['human']}
 
-    def __init__(self, df, window_size=5, initial_balance=10000, max_steps=None, trading_fee_pct=0.0001, market_df=None, market_dfs=None, reward_metric='profit', sma_length=50, long_only=False, trace=False):
+    def __init__(self, df, window_size=5, initial_balance=10000, max_steps=None, trading_fee_pct=0.0001, market_df=None, market_dfs=None, reward_metric='profit', sma_length=50, long_only=False, trace=False, start_step=None):
         super(StockTradingEnv, self).__init__()
 
         self.df = df.copy()
@@ -18,6 +18,9 @@ class StockTradingEnv(gym.Env):
         self.long_only = long_only
         self.trace = trace
         self.returns_history = deque(maxlen=50) # Rolling window for Sharpe calculation
+        
+        # Allow custom start step for testing on subset of data
+        self.start_step = start_step
         
         # Handle multiple market dataframes
         self.market_dfs = []
@@ -88,7 +91,13 @@ class StockTradingEnv(gym.Env):
             low=-np.inf, high=np.inf, shape=(self.obs_shape,), dtype=np.float32
         )
 
-        self.current_step = self.window_size
+        # Set initial current_step based on start_step or default to window_size
+        if self.start_step is not None and self.start_step >= self.window_size:
+            self.initial_step = self.start_step
+        else:
+            self.initial_step = self.window_size
+        
+        self.current_step = self.initial_step
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -97,7 +106,7 @@ class StockTradingEnv(gym.Env):
         self.shares_held = 0
         self.net_worth = self.initial_balance
         self.max_net_worth = self.initial_balance
-        self.current_step = self.window_size
+        self.current_step = self.initial_step
         
         # Track history for rendering
         self.net_worth_history = [self.net_worth]
@@ -203,8 +212,13 @@ class StockTradingEnv(gym.Env):
             # Calculate value to trade
             value_to_trade = target_share_value - current_share_value
             
-            # Calculate shares to trade
-            shares_to_trade = int(value_to_trade / current_price)
+            # Calculate shares to trade (accounting for fees from the start)
+            if value_to_trade > 0:  # Buying
+                # For buying: shares_to_buy = available_cash / (price * (1 + fee))
+                # But first try the target
+                shares_to_trade = int(value_to_trade / (current_price * (1 + self.trading_fee_pct)))
+            else:  # Selling
+                shares_to_trade = int(value_to_trade / current_price)
             
             if shares_to_trade != 0:
                 trade_value = abs(shares_to_trade * current_price)
@@ -223,15 +237,13 @@ class StockTradingEnv(gym.Env):
                         self.balance -= cost
                         self.shares_held += shares_to_trade
                     else:
-                        # Max buy with available cash
-                        # This handles the case where we want to go Long but don't have enough cash
-                        # It also handles "Covering" a short position if we have cash
-                        max_trade_value = self.balance / (1 + self.trading_fee_pct)
-                        shares_to_trade = int(max_trade_value / current_price)
-                        if shares_to_trade > 0:
-                            cost = shares_to_trade * current_price * (1 + self.trading_fee_pct)
+                        # Not enough cash for the calculated shares_to_trade
+                        # Buy as many as we can afford
+                        max_shares = int(self.balance / (current_price * (1 + self.trading_fee_pct)))
+                        if max_shares > 0:
+                            cost = max_shares * current_price * (1 + self.trading_fee_pct)
                             self.balance -= cost
-                            self.shares_held += shares_to_trade
+                            self.shares_held += max_shares
                             
                 else: # Sell
                     revenue = trade_value - fee
@@ -254,7 +266,8 @@ class StockTradingEnv(gym.Env):
             # Return a dummy observation (will be ignored since done=True)
             observation = np.zeros(self.obs_shape, dtype=np.float32)
             reward = 0  # No reward for going past the data
-            info = {'net_worth': self.net_worth}
+            # Include actual shares and balance in info so test.py can log the final trade
+            info = {'net_worth': self.net_worth, 'shares_held': self.shares_held, 'balance': self.balance}
             return observation, reward, terminated, False, info
         
         # Calculate reward

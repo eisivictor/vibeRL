@@ -11,38 +11,27 @@ import shutil
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
-# DJIA stocks (as of 2025)
+# MY stocks
 DJIA_TICKERS = [
     "AAPL",  # Apple
     "MSFT",  # Microsoft
     "JNJ",   # Johnson & Johnson
-    "V",     # Visa
-    "UNH",   # UnitedHealth
-    "JPM",   # JPMorgan Chase
     "WMT",   # Walmart
     "PG",    # Procter & Gamble
-    "HD",    # Home Depot
     "CVX",   # Chevron
     "MRK",   # Merck
-    "KO",    # Coca-Cola
-    "PFE",   # Pfizer
-    "DIS",   # Disney
-    "MCD",   # McDonald's
-    "CSCO",  # Cisco
-    "NKE",   # Nike
+    "CSCO",  # Cisco    
     "VZ",    # Verizon
     "INTC",  # Intel
-    "IBM",   # IBM
-    "BA",    # Boeing
-    "AXP",   # American Express
-    "GS",    # Goldman Sachs
-    "CAT",   # Caterpillar
-    "TRV",   # Travelers
-    "MMM",   # 3M
-    "DOW",   # Dow Inc
-    "HON",   # Honeywell
-    "CRM",   # Salesforce
-    "AMGN",  # Amgen
+    "IBM",   # IBM    
+    "REGN",  # Regeneron
+    "TSLA",  # Tesla
+    "NVDA",  # Nvidia
+    "AMZN",  # Amazon
+    "NFLX",  # Netflix
+    "GOOGL", # Alphabet
+    "META",  # Meta Platforms
+    "LLY",   # Eli Lilly
 ]
 
 # Configuration
@@ -52,7 +41,7 @@ WINDOW_SIZE = 20
 ENT_COEF = 0.1
 TRADING_FEE = 0.001
 BUDGET = 3000
-TIMESTEPS = 10000
+TIMESTEPS = 20000
 UNSEEN_TEST_WEEKS = 2  # Number of weeks of unseen data for testing (data after training end)
 
 # Date ranges (calculated dynamically)
@@ -169,7 +158,7 @@ def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=Fal
             "--market_ticker", MARKET_TICKERS,
             "--norm_start_date", NORM_START,
             "--norm_end_date", NORM_END,
-            "--norm_warmup_steps", "10000",
+            "--norm_warmup_steps", "20000",
             "--reward_metric", REWARD_METRIC,
             "--window_size", str(WINDOW_SIZE),
             "--long_only",
@@ -192,6 +181,7 @@ def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=Fal
             "--budget", str(BUDGET),
             "--start_date", TRAIN_START,
             "--end_date", TRAIN_END,
+            "--ent_coef", str(ENT_COEF),
         ]
         
         if not run_command(train_cmd, f"Training {ticker}"):
@@ -205,8 +195,10 @@ def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=Fal
             "--config", config_path,
             "--start_date", TEST_START,
             "--end_date", TEST_END,
-            "--trace"
+            "--trace",
+            "--mark-date",TRAIN_END,
         ]
+            
         
         if not run_command(test_cmd, f"Testing {ticker}"):
             return False, None
@@ -242,6 +234,9 @@ def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=Fal
 
 def main():
     """Main execution"""
+    # Declare globals at the very beginning
+    global DATE_RANGES, NORM_START, NORM_END, TRAIN_START, TRAIN_END, TEST_START, TEST_END, REWARD_METRIC, ENT_COEF
+    
     import argparse
     parser = argparse.ArgumentParser(
         description="Run normalize, train, and test on DJIA stocks",
@@ -260,11 +255,19 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
     parser.add_argument("--continue-on-error", action="store_true", help="Continue with next ticker if one fails")
     parser.add_argument("--unseen-weeks", type=int, default=UNSEEN_TEST_WEEKS, 
                         help=f"Number of weeks at the end for unseen test data (default: {UNSEEN_TEST_WEEKS})")
+    parser.add_argument("--clear", action="store_true",
+                        help="Clear all existing models and results before starting (fresh run)")
+    parser.add_argument("--reward-metric", type=str, default=REWARD_METRIC,
+                        choices=['profit', 'sharpe', 'sortino', 'excess_return'],
+                        help=f"Reward metric to use for training (default: {REWARD_METRIC})")
+    parser.add_argument("--summary", action="store_true",
+                        help="Scan all performance logs and show last actions summary (skip training/testing)")
+    parser.add_argument("--ent-coef", type=float, default=ENT_COEF,
+                        help=f"Entropy coefficient for exploration during training (default: {ENT_COEF})")
     
     args = parser.parse_args()
     
     # Update date ranges based on unseen weeks parameter
-    global DATE_RANGES, NORM_START, NORM_END, TRAIN_START, TRAIN_END, TEST_START, TEST_END
     if args.unseen_weeks != UNSEEN_TEST_WEEKS:
         DATE_RANGES = get_date_ranges(args.unseen_weeks)
         NORM_START = DATE_RANGES['norm_start']
@@ -274,11 +277,113 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
         TEST_START = DATE_RANGES['test_start']
         TEST_END = DATE_RANGES['test_end']
     
+    # Update reward metric if specified
+    REWARD_METRIC = args.reward_metric
+    
+    # Update entropy coefficient if specified
+    ENT_COEF = args.ent_coef
+    
     # Determine which tickers to process
     if args.tickers:
         tickers = [t.strip().upper() for t in args.tickers.split(",")]
     else:
         tickers = DJIA_TICKERS
+    
+    # If summary mode, scan logs and exit
+    if args.summary:
+        print(f"\n{'='*80}")
+        print(f"  SCANNING PERFORMANCE LOGS")
+        print(f"{'='*80}\n")
+        
+        djia_folder = "djia_results"
+        if not os.path.exists(djia_folder):
+            print(f"No results folder found at: {djia_folder}")
+            return 0
+        
+        # Scan all log files
+        all_actions = []
+        for ticker in tickers:
+            log_file = os.path.join(djia_folder, f"{ticker}_performance.log")
+            if os.path.exists(log_file):
+                date_str, action_type, full_line = get_last_action_from_log(log_file)
+                if date_str:
+                    all_actions.append({
+                        'ticker': ticker,
+                        'date': date_str,
+                        'action': action_type,
+                        'details': full_line
+                    })
+                    print(f"✓ {ticker}: Found last action on {date_str}")
+                else:
+                    print(f"✗ {ticker}: No actions found in log")
+            else:
+                print(f"✗ {ticker}: Log file not found")
+        
+        # Display results sorted by date
+        if all_actions:
+            print(f"\n{'='*80}")
+            print(f"  LAST ACTIONS SUMMARY (Most Recent First)")
+            print(f"{'='*80}")
+            
+            # Sort by date (descending)
+            all_actions_sorted = sorted(all_actions, key=lambda x: x['date'], reverse=True)
+            
+            for action_info in all_actions_sorted:
+                print(f"{action_info['ticker']:6} | {action_info['date']} | {action_info['action']:6} | {action_info['details']}")
+            
+            print(f"\n{'='*80}")
+            print(f"Total: {len(all_actions)} tickers with recorded actions")
+            print(f"{'='*80}\n")
+        else:
+            print("\nNo actions found in any log files.")
+        
+        return 0
+    
+    # Clear existing data if requested
+    if args.clear:
+        print(f"\n{'='*80}")
+        print(f"  CLEARING EXISTING DATA")
+        print(f"{'='*80}")
+        
+        items_cleared = []
+        
+        # Clear model files for all tickers
+        for ticker in tickers:
+            model_base = f"models/{ticker}_djia"
+            files_to_remove = [
+                f"{model_base}.zip",
+                f"{model_base}",
+                f"{model_base}_metadata.json",
+                f"{model_base}_vecnormalize.pkl"
+            ]
+            for file in files_to_remove:
+                if os.path.exists(file):
+                    try:
+                        if os.path.isdir(file):
+                            shutil.rmtree(file)
+                        else:
+                            os.remove(file)
+                        items_cleared.append(file)
+                        print(f"  ✓ Removed: {file}")
+                    except Exception as e:
+                        print(f"  ✗ Failed to remove {file}: {e}")
+        
+        # Clear djia_results directory
+        if os.path.exists("djia_results"):
+            try:
+                for ticker in tickers:
+                    log_file = f"djia_results/{ticker}_performance.log"
+                    png_file = f"djia_results/{ticker}_performance.png"
+                    for file in [log_file, png_file]:
+                        if os.path.exists(file):
+                            os.remove(file)
+                            items_cleared.append(file)
+                            print(f"  ✓ Removed: {file}")
+            except Exception as e:
+                print(f"  ✗ Failed to clear results: {e}")
+        
+        print(f"\nCleared {len(items_cleared)} items")
+        print(f"{'='*80}\n")
     
     # Calculate unseen period days
     train_end_dt = datetime.strptime(TRAIN_END, "%Y-%m-%d")
@@ -290,6 +395,8 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
     print(f"{'='*80}")
     print(f"Tickers to process: {len(tickers)}")
     print(f"Tickers: {', '.join(tickers)}")
+    print(f"Reward metric: {REWARD_METRIC}")
+    print(f"Entropy coefficient: {ENT_COEF}")
     print(f"Training timesteps: {TIMESTEPS:,}")
     print(f"Budget: ${BUDGET:,}")
     print(f"Normalization period: {NORM_START} to {NORM_END}")
