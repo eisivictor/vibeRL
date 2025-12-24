@@ -22,7 +22,7 @@ def download_data(ticker, start_date, end_date):
     data = data.dropna()
     return data
 
-def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=False, trace=False, _user_provided_dates=None, allow_norm_mismatch=False, initial_balance=None, mark_date=None, use_plotly=False):
+def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=False, trace=False, _user_provided_dates=None, allow_norm_mismatch=False, initial_balance=None, mark_date=None, use_plotly=False, execution_model='close'):
     # Load configuration
     if not os.path.exists(config_path):
         print(f"Config file not found: {config_path}")
@@ -193,7 +193,7 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
     
     # Create test environment with full data (including lookback period)
     # Pass start_step to begin trading from the actual test period start
-    test_env_raw = DummyVecEnv([lambda: StockTradingEnv(df_full, window_size=window_size, market_dfs=market_dfs_full, sma_length=sma_length, long_only=long_only, trading_fee_pct=trading_fee, initial_balance=initial_balance, start_step=test_start_idx, trace=trace)])
+    test_env_raw = DummyVecEnv([lambda: StockTradingEnv(df_full, window_size=window_size, market_dfs=market_dfs_full, sma_length=sma_length, long_only=long_only, trading_fee_pct=trading_fee, initial_balance=initial_balance, start_step=test_start_idx, trace=trace, execution_model=execution_model)])
     
     # Load the pre-generated normalization stats with error handling
     try:
@@ -371,15 +371,32 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
             
         net_worth_history.append(current_net_worth)
         
+        # Get execution price based on execution model
+        if execution_model == 'next-open':
+            # For next-open: execution happens at next bar's open
+            # Check if there's a next bar
+            if step_counter < len(dates) - 1:
+                next_date = dates[step_counter + 1]
+                execution_price = df_full[df_full['Date'] == next_date]['Open'].iloc[0]
+                execution_info = f" (exec@next-open ${execution_price:.2f})"
+            else:
+                # Last bar, executed at current close
+                execution_price = current_price
+                execution_info = f" (exec@close ${execution_price:.2f})"
+        else:
+            # Default 'close' model
+            execution_price = current_price
+            execution_info = ""
+        
         # Log trades based on share change
         shares_change = current_shares - prev_shares
         if shares_change > 0: # Buy or Cover
             if prev_shares < 0:
                 cover_steps.append(step_counter)
-                log_entry = f"{current_date.date()}: COVER {shares_change} shares (Target: {action_val:.2f}) at ${current_price:.2f} | Held: {current_shares:.2f} | Balance: ${current_balance:.2f} | Net Worth: ${current_net_worth:.2f}"
+                log_entry = f"{current_date.date()}: COVER {shares_change} shares (Target: {action_val:.2f}) at ${current_price:.2f}{execution_info} | Held: {current_shares:.2f} | Balance: ${current_balance:.2f} | Net Worth: ${current_net_worth:.2f}"
             else:
                 buy_steps.append(step_counter)
-                log_entry = f"{current_date.date()}: BUY  {shares_change} shares (Target: {action_val:.2f}) at ${current_price:.2f} | Held: {current_shares:.2f} | Balance: ${current_balance:.2f} | Net Worth: ${current_net_worth:.2f}"
+                log_entry = f"{current_date.date()}: BUY  {shares_change} shares (Target: {action_val:.2f}) at ${current_price:.2f}{execution_info} | Held: {current_shares:.2f} | Balance: ${current_balance:.2f} | Net Worth: ${current_net_worth:.2f}"
             action_log.append(log_entry)
         elif shares_change < 0: # Sell or Short
             if is_forced_liquidation:
@@ -388,11 +405,11 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
                 pass
             elif prev_shares <= 0:
                 short_steps.append(step_counter)
-                log_entry = f"{current_date.date()}: SHORT {abs(shares_change)} shares (Target: {action_val:.2f}) at ${current_price:.2f} | Held: {current_shares:.2f} | Balance: ${current_balance:.2f} | Net Worth: ${current_net_worth:.2f}"
+                log_entry = f"{current_date.date()}: SHORT {abs(shares_change)} shares (Target: {action_val:.2f}) at ${current_price:.2f}{execution_info} | Held: {current_shares:.2f} | Balance: ${current_balance:.2f} | Net Worth: ${current_net_worth:.2f}"
                 action_log.append(log_entry)
             else:
                 sell_steps.append(step_counter)
-                log_entry = f"{current_date.date()}: SELL {abs(shares_change)} shares (Target: {action_val:.2f}) at ${current_price:.2f} | Held: {current_shares:.2f} | Balance: ${current_balance:.2f} | Net Worth: ${current_net_worth:.2f}"
+                log_entry = f"{current_date.date()}: SELL {abs(shares_change)} shares (Target: {action_val:.2f}) at ${current_price:.2f}{execution_info} | Held: {current_shares:.2f} | Balance: ${current_balance:.2f} | Net Worth: ${current_net_worth:.2f}"
                 action_log.append(log_entry)
             
         step_counter += 1

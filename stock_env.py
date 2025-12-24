@@ -9,7 +9,7 @@ class StockTradingEnv(gym.Env):
     """A stock trading environment for Gymnasium"""
     metadata = {'render_modes': ['human']}
 
-    def __init__(self, df, window_size=5, initial_balance=10000, max_steps=None, trading_fee_pct=0.0001, market_df=None, market_dfs=None, reward_metric='profit', sma_length=50, long_only=False, trace=False, start_step=None):
+    def __init__(self, df, window_size=5, initial_balance=10000, max_steps=None, trading_fee_pct=0.0001, market_df=None, market_dfs=None, reward_metric='profit', sma_length=50, long_only=False, trace=False, start_step=None, execution_model='next-open'):
         super(StockTradingEnv, self).__init__()
 
         self.df = df.copy()
@@ -21,6 +21,10 @@ class StockTradingEnv(gym.Env):
         
         # Allow custom start step for testing on subset of data
         self.start_step = start_step
+        
+        # Execution model: 'next-open' = execute at next bar open (default, realistic)
+        #                  'close' = execute at current bar close (for backtesting)
+        self.execution_model = execution_model
         
         # Handle multiple market dataframes
         self.market_dfs = []
@@ -185,6 +189,21 @@ class StockTradingEnv(gym.Env):
             # Clip to ensure we stay in [0, 1]
             target_weight = np.clip(target_weight, 0, 1)
         
+        # Get execution price based on execution model
+        if self.execution_model == 'next-open':
+            # For next-open: we need to check if next bar exists
+            # If it does, use next bar's Open price for execution
+            # If not, we're at the end, use current Close
+            if self.current_step + 1 < len(self.df):
+                execution_price = self.df.iloc[self.current_step + 1]['Open']
+            else:
+                # At the last bar, execute at current close (no next bar)
+                execution_price = self.df.iloc[self.current_step]['Close']
+        else:
+            # Default 'close' model: execute at current bar's close
+            execution_price = self.df.iloc[self.current_step]['Close']
+        
+        # Use current close for portfolio valuation (what you see at bar close)
         current_price = self.df.iloc[self.current_step]['Close']
         
         # Calculate current Net Worth
@@ -212,16 +231,16 @@ class StockTradingEnv(gym.Env):
             # Calculate value to trade
             value_to_trade = target_share_value - current_share_value
             
-            # Calculate shares to trade (accounting for fees from the start)
+            # Calculate shares to trade using EXECUTION price (accounting for fees from the start)
             if value_to_trade > 0:  # Buying
                 # For buying: shares_to_buy = available_cash / (price * (1 + fee))
                 # But first try the target
-                shares_to_trade = int(value_to_trade / (current_price * (1 + self.trading_fee_pct)))
+                shares_to_trade = int(value_to_trade / (execution_price * (1 + self.trading_fee_pct)))
             else:  # Selling
-                shares_to_trade = int(value_to_trade / current_price)
+                shares_to_trade = int(value_to_trade / execution_price)
             
             if shares_to_trade != 0:
-                trade_value = abs(shares_to_trade * current_price)
+                trade_value = abs(shares_to_trade * execution_price)
                 fee = trade_value * self.trading_fee_pct
                 
                 # Check if we can afford the trade (including fee)
@@ -238,10 +257,10 @@ class StockTradingEnv(gym.Env):
                         self.shares_held += shares_to_trade
                     else:
                         # Not enough cash for the calculated shares_to_trade
-                        # Buy as many as we can afford
-                        max_shares = int(self.balance / (current_price * (1 + self.trading_fee_pct)))
+                        # Buy as many as we can afford using EXECUTION price
+                        max_shares = int(self.balance / (execution_price * (1 + self.trading_fee_pct)))
                         if max_shares > 0:
-                            cost = max_shares * current_price * (1 + self.trading_fee_pct)
+                            cost = max_shares * execution_price * (1 + self.trading_fee_pct)
                             self.balance -= cost
                             self.shares_held += max_shares
                             

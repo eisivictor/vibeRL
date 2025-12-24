@@ -92,7 +92,7 @@ def download_data(ticker, start_date, end_date):
     data = data.dropna()
     return data
 
-def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_date=None, continue_training=False, timesteps=10000, ticker="AAPL", custom_metadata_path=None, market_ticker=None, market_tickers=None, reward_metric='profit', ent_coef=0.01, sma_length=50, long_only=False, trading_fee_pct=0.0001, trace=False, normalization_start_date=None, normalization_end_date=None, load_normalization=False, initial_balance=10000):
+def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_date=None, continue_training=False, timesteps=10000, ticker="AAPL", custom_metadata_path=None, market_ticker=None, market_tickers=None, reward_metric='profit', ent_coef=0.01, sma_length=50, long_only=False, trading_fee_pct=0.0001, trace=False, normalization_start_date=None, normalization_end_date=None, load_normalization=False, initial_balance=10000, execution_model='next-open'):
     # 1. Validate normalization requirements
     
     if start_date is None:
@@ -205,7 +205,7 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
     print(f"Loading frozen stats from {stats_path}...")
     
     # Create the training environment with full data (including lookback) and start_step
-    env = DummyVecEnv([lambda: StockTradingEnv(df_full, window_size=window_size, market_dfs=market_dfs_full, reward_metric=reward_metric, sma_length=sma_length, long_only=long_only, trading_fee_pct=trading_fee_pct, trace=trace, initial_balance=initial_balance, start_step=train_start_idx)])
+    env = DummyVecEnv([lambda: StockTradingEnv(df_full, window_size=window_size, market_dfs=market_dfs_full, reward_metric=reward_metric, sma_length=sma_length, long_only=long_only, trading_fee_pct=trading_fee_pct, trace=trace, initial_balance=initial_balance, start_step=train_start_idx, execution_model=execution_model)])
     
     # Load the pre-generated normalization stats with error handling
     try:

@@ -141,7 +141,7 @@ def get_last_action_from_log(log_file):
     except Exception as e:
         return None, None, f"Error reading log: {e}"
 
-def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=False):
+def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=False, execution_model='close'):
     """Process a single ticker: normalize, train, and test"""
     config_path = f"models/{ticker}_djia"
     
@@ -167,6 +167,7 @@ def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=Fal
             "--start_date", TRAIN_START,
             "--end_date", TRAIN_END,
             "--budget", str(BUDGET),
+            "--execution-model", execution_model,
         ]
         
         if not run_command(normalize_cmd, f"Normalizing {ticker}"):
@@ -182,6 +183,7 @@ def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=Fal
             "--start_date", TRAIN_START,
             "--end_date", TRAIN_END,
             "--ent_coef", str(ENT_COEF),
+            "--execution-model", execution_model,
         ]
         
         if not run_command(train_cmd, f"Training {ticker}"):
@@ -197,6 +199,7 @@ def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=Fal
             "--end_date", TEST_END,
             "--trace",
             "--mark-date",TRAIN_END,
+            "--execution-model", execution_model,
         ]
             
         
@@ -264,6 +267,8 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
                         help="Scan all performance logs and show last actions summary (skip training/testing)")
     parser.add_argument("--ent-coef", type=float, default=ENT_COEF,
                         help=f"Entropy coefficient for exploration during training (default: {ENT_COEF})")
+    parser.add_argument("--execution-model", type=str, default='next-open', choices=['close', 'next-open'],
+                        help="Execution model: 'next-open' = execute at next bar open (default, realistic), 'close' = execute at bar close (backtesting)")
     
     args = parser.parse_args()
     
@@ -397,6 +402,7 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
     print(f"Tickers: {', '.join(tickers)}")
     print(f"Reward metric: {REWARD_METRIC}")
     print(f"Entropy coefficient: {ENT_COEF}")
+    print(f"Execution model: {args.execution_model}")
     print(f"Training timesteps: {TIMESTEPS:,}")
     print(f"Budget: ${BUDGET:,}")
     print(f"Normalization period: {NORM_START} to {NORM_END}")
@@ -419,7 +425,8 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
             ticker,
             skip_normalize=args.skip_normalize,
             skip_train=args.skip_train,
-            skip_test=args.skip_test
+            skip_test=args.skip_test,
+            execution_model=args.execution_model
         )
         
         if success:

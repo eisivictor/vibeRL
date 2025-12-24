@@ -33,6 +33,7 @@ def main():
     parser.add_argument('--budget', type=float, default=None, help="Initial balance/budget for testing (default: 10000)")
     parser.add_argument('--mark-date', type=str, default=None, help="Draw a vertical line on the chart at this date (YYYY-MM-DD)")
     parser.add_argument('--plotly', action='store_true', help="Generate interactive Plotly chart (allows zooming) in addition to PNG")
+    parser.add_argument('--execution-model', type=str, default='next-open', choices=['close', 'next-open'], help="Execution model: 'next-open' = execute at next bar open (default, realistic), 'close' = execute at bar close (backtesting)")
     
     args = parser.parse_args()
     
@@ -243,7 +244,8 @@ def main():
             normalization_start_date=norm_start_date,
             normalization_end_date=norm_end_date,
             load_normalization=load_normalization,
-            initial_balance=initial_balance
+            initial_balance=initial_balance,
+            execution_model=args.execution_model
         )
     elif args.mode == 'test':
         if not args.config:
@@ -266,7 +268,8 @@ def main():
             allow_norm_mismatch=args.allow_norm_mismatch,
             initial_balance=args.budget,
             mark_date=args.mark_date,
-            use_plotly=args.plotly
+            use_plotly=args.plotly,
+            execution_model=args.execution_model
         )
     elif args.mode == 'test_s':
         if not args.config:
