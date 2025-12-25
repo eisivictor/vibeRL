@@ -34,6 +34,7 @@ def main():
     parser.add_argument('--mark-date', type=str, default=None, help="Draw a vertical line on the chart at this date (YYYY-MM-DD)")
     parser.add_argument('--plotly', action='store_true', help="Generate interactive Plotly chart (allows zooming) in addition to PNG")
     parser.add_argument('--execution-model', type=str, default='next-open', choices=['close', 'next-open'], help="Execution model: 'next-open' = execute at next bar open (default, realistic), 'close' = execute at bar close (backtesting)")
+    parser.add_argument('--debug', action='store_true', help="Enable debug trace plot mode (plots trace file target along with stock price)")
     
     args = parser.parse_args()
     
@@ -269,7 +270,8 @@ def main():
             initial_balance=args.budget,
             mark_date=args.mark_date,
             use_plotly=args.plotly,
-            execution_model=args.execution_model
+            execution_model=args.execution_model,
+            debug=args.debug
         )
     elif args.mode == 'test_s':
         if not args.config:

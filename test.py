@@ -22,7 +22,7 @@ def download_data(ticker, start_date, end_date):
     data = data.dropna()
     return data
 
-def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=False, trace=False, _user_provided_dates=None, allow_norm_mismatch=False, initial_balance=None, mark_date=None, use_plotly=False, execution_model='close'):
+def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=False, trace=False, _user_provided_dates=None, allow_norm_mismatch=False, initial_balance=None, mark_date=None, use_plotly=False, execution_model='close', debug=False):
     # Load configuration
     if not os.path.exists(config_path):
         print(f"Config file not found: {config_path}")
@@ -30,6 +30,103 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
 
     with open(config_path, "r") as f:
         config = json.load(f)
+    
+    # Debug trace plot option
+    debug_trace_plot = debug or config.get("debug_trace_plot", False)
+    trace_file = config.get("trace_file", f"trace_{config.get('model_name', 'model')}.csv")
+    if debug_trace_plot and trace_file:
+        print(f"[DEBUG] Plotting trace file: {trace_file}")
+        try:
+            trace_df = pd.read_csv(trace_file)
+            
+            if use_plotly:
+                # Use Plotly for interactive chart
+                try:
+                    import plotly.graph_objects as go
+                    from plotly.subplots import make_subplots
+                    
+                    # Create figure with secondary y-axis
+                    fig_plotly = go.Figure()
+                    
+                    # Plot Price
+                    fig_plotly.add_trace(
+                        go.Scatter(x=trace_df['Date'], y=trace_df['Price'], mode='lines', name='Stock Price', 
+                                 line=dict(color='blue', width=2))
+                    )
+                    
+                    # Plot Target Weight on secondary y-axis
+                    fig_plotly.add_trace(
+                        go.Scatter(x=trace_df['Date'], y=trace_df['Action_Target_Weight'], mode='lines', name='Target Weight',
+                                 line=dict(color='orange', width=2), yaxis='y2')
+                    )
+                    
+                    # Add mark date if specified
+                    if mark_date:
+                        try:
+                            fig_plotly.add_vline(x=mark_date, line_dash="dash", line_color="red", 
+                                               line_width=2, opacity=0.7)
+                        except Exception as e:
+                            print(f"Warning: Could not add mark line to Plotly: {e}")
+                    
+                    # Update layout
+                    fig_plotly.update_layout(
+                        height=600,
+                        showlegend=True,
+                        hovermode='x unified',
+                        title_text='Trace File Debug Plot',
+                        yaxis=dict(title=dict(text='Stock Price', font=dict(color='blue'))),
+                        yaxis2=dict(title=dict(text='Target Weight', font=dict(color='orange')), overlaying='y', side='right')
+                    )
+                    
+                    # Save and open
+                    html_file = 'debug_trace_plot.html'
+                    html_path = os.path.abspath(html_file)
+                    fig_plotly.write_html(html_path)
+                    print(f"Interactive Plotly debug chart saved to {html_file}")
+                    print(f"Full path: {html_path}")
+                    
+                    # Try to open in browser
+                    import webbrowser
+                    try:
+                        if webbrowser.open(f'file://{html_path}'):
+                            print(f"Opening {html_file} in browser...")
+                        else:
+                            print(f"Could not open browser automatically. Please open manually: {html_path}")
+                    except Exception as e:
+                        print(f"Could not open browser: {e}")
+                        print(f"Please open manually: {html_path}")
+                        
+                except ImportError:
+                    print("Warning: plotly not installed. Falling back to matplotlib.")
+                    use_plotly = False
+            
+            if not use_plotly:
+                # Use matplotlib
+                fig, ax1 = plt.subplots(figsize=(14, 7))
+                ax1.plot(trace_df['Date'], trace_df['Price'], label='Stock Price', color='blue', alpha=0.6)
+                ax2 = ax1.twinx()
+                ax2.plot(trace_df['Date'], trace_df['Action_Target_Weight'], label='Target Weight', color='orange', alpha=0.5)
+                ax1.set_xlabel('Date')
+                ax1.set_ylabel('Stock Price', color='blue')
+                ax2.set_ylabel('Target Weight', color='orange')
+                if mark_date:
+                    try:
+                        mark_dt = pd.to_datetime(mark_date)
+                        ax1.axvline(x=mark_dt, color='red', linestyle='--', linewidth=2, label=f'Mark: {mark_date}', alpha=0.7)
+                    except Exception as e:
+                        print(f"Warning: Could not draw mark at date '{mark_date}': {e}")
+                fig.autofmt_xdate()
+                fig.suptitle('Trace File Debug Plot')
+                ax1.legend(loc='upper left')
+                ax2.legend(loc='upper right')
+                plt.tight_layout()
+                plt.savefig('debug_trace_plot.png')
+                print("Debug trace plot saved to debug_trace_plot.png")
+                plt.show()
+                
+        except Exception as e:
+            print(f"[DEBUG] Failed to plot trace file: {e}")
+        return
     
     window_size = config.get("window_size", 5)
     sma_length = config.get("sma_length", 50)

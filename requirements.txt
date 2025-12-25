@@ -7,3 +7,5 @@ yfinance
 matplotlib
 shimmy>=2.0.0
 pandas_ta
+plotly
+
