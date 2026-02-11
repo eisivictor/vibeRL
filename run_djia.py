@@ -11,52 +11,76 @@ import shutil
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
+# Import PPO network configuration from train.py
+try:
+    import train
+    PPO_NETWORK_DEPTH = train.PPO_NETWORK_DEPTH
+    PPO_NETWORK_WIDTH_MULTIPLIER = train.PPO_NETWORK_WIDTH_MULTIPLIER
+    PPO_MIN_HIDDEN_DIM = train.PPO_MIN_HIDDEN_DIM
+    PPO_MAX_HIDDEN_DIM = train.PPO_MAX_HIDDEN_DIM
+    PPO_LSTM_HIDDEN_SIZE = train.PPO_LSTM_HIDDEN_SIZE
+except ImportError:
+    # Fallback defaults if train.py can't be imported
+    PPO_NETWORK_DEPTH = 3
+    PPO_NETWORK_WIDTH_MULTIPLIER = 2.0
+    PPO_MIN_HIDDEN_DIM = 64
+    PPO_MAX_HIDDEN_DIM = 512
+    PPO_LSTM_HIDDEN_SIZE = 128
+
 # MY stocks
 DJIA_TICKERS = [
     "AAPL",  # Apple
     "MSFT",  # Microsoft
-    "JNJ",   # Johnson & Johnson
-    "WMT",   # Walmart
     "PG",    # Procter & Gamble
-    "CVX",   # Chevron
     "MRK",   # Merck
     "CSCO",  # Cisco    
-    "VZ",    # Verizon
-    "INTC",  # Intel
-    "IBM",   # IBM    
     "REGN",  # Regeneron
     "TSLA",  # Tesla
     "NVDA",  # Nvidia
     "AMZN",  # Amazon
-    "NFLX",  # Netflix
     "GOOGL", # Alphabet
     "META",  # Meta Platforms
-    "LLY",   # Eli Lilly
+    "MU",    # Micron Technology
+    "NVO",   # Novo Nordisk
+    "XOM",   # Exxon Mobil
+    "ASML",  # ASML Holding
+    "TSM",   # Taiwan Semiconductor
+    "STX",   # Seagate Technology
+    "WDC",   # Western Digital
 ]
 
 # Configuration
 MARKET_TICKERS = "^GSPC,^DJI,^VIX"
 REWARD_METRIC = "profit"
-WINDOW_SIZE = 20
+WINDOW_SIZE = 30
 ENT_COEF = 0.1
 TRADING_FEE = 0.001
-BUDGET = 3000
-TIMESTEPS = 20000
+BUDGET = 10000
+TIMESTEPS = 50000
+WARMUP_STEPS = 10000
 UNSEEN_TEST_WEEKS = 2  # Number of weeks of unseen data for testing (data after training end)
 
 # Date ranges (calculated dynamically)
-def get_date_ranges(unseen_weeks=UNSEEN_TEST_WEEKS):
-    """Calculate date ranges based on current date
+def get_date_ranges(unseen_weeks=UNSEEN_TEST_WEEKS, start_date=None, end_date=None):
+    """Calculate date ranges based on current date or custom dates
     
     Args:
         unseen_weeks: Number of weeks at the end that training won't see (for out-of-sample testing)
+        start_date: Custom start date (YYYY-MM-DD), if None uses 1 year ago
+        end_date: Custom end date (YYYY-MM-DD), if None uses today
     """
-    # Norm end = today
-    norm_end = datetime.now()
+    # Use custom end date or today
+    if end_date:
+        norm_end = datetime.strptime(end_date, "%Y-%m-%d")
+    else:
+        norm_end = datetime.now()
     
-    # Norm start = 1 year before, rounded to 01 of the month
-    norm_start = norm_end - relativedelta(years=1)
-    norm_start = norm_start.replace(day=1)
+    # Use custom start date or 1 year before end date, rounded to 01 of the month
+    if start_date:
+        norm_start = datetime.strptime(start_date, "%Y-%m-%d")
+    else:
+        norm_start = norm_end - relativedelta(years=1)
+        norm_start = norm_start.replace(day=1)
     
     # Train start = same as norm start
     train_start = norm_start
@@ -141,9 +165,9 @@ def get_last_action_from_log(log_file):
     except Exception as e:
         return None, None, f"Error reading log: {e}"
 
-def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=False, execution_model='close'):
+def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=False, invest=False, plotly=False, execution_model='close', algorithm='RecurrentPPO', learning_rate=3e-4, config_suffix="", binary_action=False, network_depth=None, window_size=WINDOW_SIZE, norm_warmup_steps=WARMUP_STEPS):
     """Process a single ticker: normalize, train, and test"""
-    config_path = f"models/{ticker}_djia"
+    config_path = f"models/{ticker}{config_suffix}_djia"
     
     print(f"\n\n{'#'*80}")
     print(f"# Processing {ticker}")
@@ -158,9 +182,9 @@ def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=Fal
             "--market_ticker", MARKET_TICKERS,
             "--norm_start_date", NORM_START,
             "--norm_end_date", NORM_END,
-            "--norm_warmup_steps", "20000",
+            "--norm_warmup_steps", str(norm_warmup_steps),
             "--reward_metric", REWARD_METRIC,
-            "--window_size", str(WINDOW_SIZE),
+            "--window_size", str(window_size),
             "--long_only",
             "--ent_coef", str(ENT_COEF),
             "--trading_fee", str(TRADING_FEE),
@@ -169,6 +193,12 @@ def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=Fal
             "--budget", str(BUDGET),
             "--execution-model", execution_model,
         ]
+        
+        if binary_action:
+            normalize_cmd.append("--binary_action")
+        
+        if network_depth is not None:
+            normalize_cmd.extend(["--network_depth", str(network_depth)])
         
         if not run_command(normalize_cmd, f"Normalizing {ticker}"):
             return False, None
@@ -184,7 +214,17 @@ def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=Fal
             "--end_date", TRAIN_END,
             "--ent_coef", str(ENT_COEF),
             "--execution-model", execution_model,
+            "--algorithm", algorithm,
+            "--learning_rate", str(learning_rate),
+            "--continue_training",            
+            "--allow_norm_mismatch"
         ]
+        
+        if binary_action:
+            train_cmd.append("--binary_action")
+        
+        if network_depth is not None:
+            train_cmd.extend(["--network_depth", str(network_depth)])
         
         if not run_command(train_cmd, f"Training {ticker}"):
             return False, None
@@ -200,6 +240,8 @@ def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=Fal
             "--trace",
             "--mark-date",TRAIN_END,
             "--execution-model", execution_model,
+            "--algorithm", algorithm,
+            "--allow_norm_mismatch"
         ]
             
         
@@ -213,7 +255,7 @@ def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=Fal
         
         # Copy performance.log
         if os.path.exists("performance.log"):
-            dest_log = os.path.join(djia_folder, f"{ticker}_performance.log")
+            dest_log = os.path.join(djia_folder, f"{ticker}{config_suffix}_performance.log")
             shutil.copy2("performance.log", dest_log)
             print(f"✓ Saved performance log to {dest_log}")
             
@@ -229,16 +271,67 @@ def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=Fal
         
         # Copy performance.png
         if os.path.exists("performance.png"):
-            dest_png = os.path.join(djia_folder, f"{ticker}_performance.png")
+            dest_png = os.path.join(djia_folder, f"{ticker}{config_suffix}_performance.png")
             shutil.copy2("performance.png", dest_png)
             print(f"✓ Saved performance chart to {dest_png}")
+    
+    # Step 4: Invest (run investing strategy scenario)
+    if invest:
+        trace_file = f"trace_{ticker}{config_suffix}_djia.csv"
+        if os.path.exists(trace_file):
+            invest_cmd = [
+                "python", "main.py", "invest",
+                "--config", config_path,
+                "--trace-file", trace_file,
+                "--budget", str(BUDGET),
+                "--execution-model", execution_model,
+                "--algorithm", algorithm,
+            ]
+            
+            if plotly:
+                invest_cmd.append("--plotly")
+                invest_cmd.append("--no-show-plot")  # Don't show plot when generating HTML
+            
+            if run_command(invest_cmd, f"Running investing strategy for {ticker}"):
+                # Save invest results to djia folder
+                djia_folder = "djia_results"
+                if not os.path.exists(djia_folder):
+                    os.makedirs(djia_folder)
+                
+                # Copy invest performance chart
+                if os.path.exists("invest_strategy_performance.png"):
+                    dest_png = os.path.join(djia_folder, f"{ticker}{config_suffix}_invest_performance.png")
+                    shutil.copy2("invest_strategy_performance.png", dest_png)
+                    print(f"✓ Saved invest performance chart to {dest_png}")
+                
+                # Copy invest plotly HTML if generated
+                if os.path.exists("invest_strategy_plotly.html"):
+                    dest_html = os.path.join(djia_folder, f"{ticker}{config_suffix}_invest_plotly.html")
+                    shutil.copy2("invest_strategy_plotly.html", dest_html)
+                    print(f"✓ Saved invest plotly chart to {dest_html}")
+                
+                # Copy invest summary log
+                if os.path.exists("invest_strategy_summary.log"):
+                    dest_log = os.path.join(djia_folder, f"{ticker}{config_suffix}_invest_summary.log")
+                    shutil.copy2("invest_strategy_summary.log", dest_log)
+                    print(f"✓ Saved invest summary to {dest_log}")
+                
+                # Copy invest trades CSV
+                if os.path.exists("invest_strategy_trades.csv"):
+                    dest_csv = os.path.join(djia_folder, f"{ticker}{config_suffix}_invest_trades.csv")
+                    shutil.copy2("invest_strategy_trades.csv", dest_csv)
+                    print(f"✓ Saved invest trades to {dest_csv}")
+            else:
+                print(f"⚠ Investing strategy failed for {ticker}, continuing...")
+        else:
+            print(f"⚠ Trace file {trace_file} not found, skipping invest step for {ticker}")
     
     return True, last_action_info
 
 def main():
     """Main execution"""
     # Declare globals at the very beginning
-    global DATE_RANGES, NORM_START, NORM_END, TRAIN_START, TRAIN_END, TEST_START, TEST_END, REWARD_METRIC, ENT_COEF
+    global DATE_RANGES, NORM_START, NORM_END, TRAIN_START, TRAIN_END, TEST_START, TEST_END, REWARD_METRIC, ENT_COEF, TIMESTEPS
     
     import argparse
     parser = argparse.ArgumentParser(
@@ -255,7 +348,11 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
     parser.add_argument("--skip-normalize", action="store_true", help="Skip normalization step")
     parser.add_argument("--skip-train", action="store_true", help="Skip training step")
     parser.add_argument("--skip-test", action="store_true", help="Skip testing step")
+    parser.add_argument("--invest", action="store_true", help="Run investing strategy scenario on trace files after testing")
+    parser.add_argument("--plotly", action="store_true", help="Generate interactive Plotly charts instead of static PNGs")
     parser.add_argument("--continue-on-error", action="store_true", help="Continue with next ticker if one fails")
+    parser.add_argument("--start-date", type=str, help="Start date for data period (YYYY-MM-DD, overrides default 1-year period)")
+    parser.add_argument("--end-date", type=str, help="End date for data period (YYYY-MM-DD, overrides default today)")
     parser.add_argument("--unseen-weeks", type=int, default=UNSEEN_TEST_WEEKS, 
                         help=f"Number of weeks at the end for unseen test data (default: {UNSEEN_TEST_WEEKS})")
     parser.add_argument("--clear", action="store_true",
@@ -263,18 +360,35 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
     parser.add_argument("--reward-metric", type=str, default=REWARD_METRIC,
                         choices=['profit', 'sharpe', 'sortino', 'excess_return'],
                         help=f"Reward metric to use for training (default: {REWARD_METRIC})")
+    parser.add_argument("--algorithm", type=str, default="RecurrentPPO",
+                        choices=['PPO', 'RecurrentPPO'],
+                        help=f"Algorithm to use: PPO (MLP) or RecurrentPPO (LSTM) (default: RecurrentPPO)")
+    parser.add_argument("--learning-rate", type=float, default=3e-4,
+                        help="Learning rate for PPO training (default: 3e-4)")
     parser.add_argument("--summary", action="store_true",
                         help="Scan all performance logs and show last actions summary (skip training/testing)")
     parser.add_argument("--ent-coef", type=float, default=ENT_COEF,
                         help=f"Entropy coefficient for exploration during training (default: {ENT_COEF})")
+    parser.add_argument("--timesteps", type=int, default=TIMESTEPS,
+                        help=f"Number of timesteps to train (default: {TIMESTEPS:,})")
     parser.add_argument("--execution-model", type=str, default='next-open', choices=['close', 'next-open'],
                         help="Execution model: 'next-open' = execute at next bar open (default, realistic), 'close' = execute at bar close (backtesting)")
+    parser.add_argument("--binary-action", action="store_true",
+                        help="Use binary all-in/all-out trading mode instead of continuous position sizing")
+    parser.add_argument("--config-suffix", type=str, default="",
+                        help="Suffix to append to config/model names (e.g., 'v2' makes 'AAPL_v2_djia')")
+    parser.add_argument("--network-depth", type=int, default=None, choices=[2, 3, 4, 5],
+                        help=f"Network depth (number of hidden layers) for PPO models (default: {PPO_NETWORK_DEPTH})")
+    parser.add_argument("--window-size", type=int, default=WINDOW_SIZE,
+                        help=f"Window size for observation (default: {WINDOW_SIZE})")
+    parser.add_argument("--norm-warmup-steps", type=int, default=WARMUP_STEPS,
+                        help=f"Number of warmup steps for normalization statistics (default: {WARMUP_STEPS:,})")
     
     args = parser.parse_args()
     
-    # Update date ranges based on unseen weeks parameter
-    if args.unseen_weeks != UNSEEN_TEST_WEEKS:
-        DATE_RANGES = get_date_ranges(args.unseen_weeks)
+    # Update date ranges based on custom dates or unseen weeks parameter
+    if args.start_date or args.end_date or args.unseen_weeks != UNSEEN_TEST_WEEKS:
+        DATE_RANGES = get_date_ranges(args.unseen_weeks, args.start_date, args.end_date)
         NORM_START = DATE_RANGES['norm_start']
         NORM_END = DATE_RANGES['norm_end']
         TRAIN_START = DATE_RANGES['train_start']
@@ -287,6 +401,9 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
     
     # Update entropy coefficient if specified
     ENT_COEF = args.ent_coef
+    
+    # Update timesteps if specified
+    TIMESTEPS = args.timesteps
     
     # Determine which tickers to process
     if args.tickers:
@@ -308,7 +425,7 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
         # Scan all log files
         all_actions = []
         for ticker in tickers:
-            log_file = os.path.join(djia_folder, f"{ticker}_performance.log")
+            log_file = os.path.join(djia_folder, f"{ticker}{args.config_suffix}_performance.log")
             if os.path.exists(log_file):
                 date_str, action_type, full_line = get_last_action_from_log(log_file)
                 if date_str:
@@ -351,10 +468,11 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
         print(f"{'='*80}")
         
         items_cleared = []
+        config_suffix = args.config_suffix
         
         # Clear model files for all tickers
         for ticker in tickers:
-            model_base = f"models/{ticker}_djia"
+            model_base = f"models/{ticker}{config_suffix}_djia"
             files_to_remove = [
                 f"{model_base}.zip",
                 f"{model_base}",
@@ -377,9 +495,27 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
         if os.path.exists("djia_results"):
             try:
                 for ticker in tickers:
-                    log_file = f"djia_results/{ticker}_performance.log"
-                    png_file = f"djia_results/{ticker}_performance.png"
-                    for file in [log_file, png_file]:
+                    # Clear files with suffix
+                    log_file = f"djia_results/{ticker}{config_suffix}_performance.log"
+                    png_file = f"djia_results/{ticker}{config_suffix}_performance.png"
+                    invest_png = f"djia_results/{ticker}{config_suffix}_invest_performance.png"
+                    invest_html = f"djia_results/{ticker}{config_suffix}_invest_plotly.html"
+                    invest_log = f"djia_results/{ticker}{config_suffix}_invest_summary.log"
+                    invest_csv = f"djia_results/{ticker}{config_suffix}_invest_trades.csv"
+                    
+                    files_to_clear = [log_file, png_file, invest_png, invest_html, invest_log, invest_csv]
+                    
+                    # Also clear files without suffix (for backward compatibility)
+                    if config_suffix:  # Only if suffix is provided
+                        old_log = f"djia_results/{ticker}_performance.log"
+                        old_png = f"djia_results/{ticker}_performance.png"
+                        old_invest_png = f"djia_results/{ticker}_invest_performance.png"
+                        old_invest_html = f"djia_results/{ticker}_invest_plotly.html"
+                        old_invest_log = f"djia_results/{ticker}_invest_summary.log"
+                        old_invest_csv = f"djia_results/{ticker}_invest_trades.csv"
+                        files_to_clear.extend([old_log, old_png, old_invest_png, old_invest_html, old_invest_log, old_invest_csv])
+                    
+                    for file in files_to_clear:
                         if os.path.exists(file):
                             os.remove(file)
                             items_cleared.append(file)
@@ -401,11 +537,20 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
     print(f"Tickers to process: {len(tickers)}")
     print(f"Tickers: {', '.join(tickers)}")
     print(f"Reward metric: {REWARD_METRIC}")
+    print(f"Algorithm: {args.algorithm}")
+    print(f"Learning rate: {args.learning_rate}")
+    print(f"Window size: {args.window_size}")
+    print(f"Network depth: {args.network_depth if args.network_depth else PPO_NETWORK_DEPTH} layers")
+    print(f"Network width multiplier: {PPO_NETWORK_WIDTH_MULTIPLIER}x")
+    print(f"Hidden dim range: {PPO_MIN_HIDDEN_DIM}-{PPO_MAX_HIDDEN_DIM}")
+    if args.algorithm == "RecurrentPPO":
+        print(f"LSTM hidden size: {PPO_LSTM_HIDDEN_SIZE}")
     print(f"Entropy coefficient: {ENT_COEF}")
     print(f"Execution model: {args.execution_model}")
     print(f"Training timesteps: {TIMESTEPS:,}")
     print(f"Budget: ${BUDGET:,}")
     print(f"Normalization period: {NORM_START} to {NORM_END}")
+    print(f"Normalization warmup steps: {args.norm_warmup_steps:,}")
     print(f"Training period: {TRAIN_START} to {TRAIN_END}")
     print(f"Testing period: {TEST_START} to {TEST_END}")
     print(f"Unseen test period: {args.unseen_weeks} weeks ({unseen_days} days)")
@@ -426,7 +571,16 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
             skip_normalize=args.skip_normalize,
             skip_train=args.skip_train,
             skip_test=args.skip_test,
-            execution_model=args.execution_model
+            invest=args.invest,
+            plotly=args.plotly,
+            execution_model=args.execution_model,
+            algorithm=args.algorithm,
+            learning_rate=args.learning_rate,
+            config_suffix=args.config_suffix,
+            binary_action=args.binary_action,
+            network_depth=args.network_depth,
+            window_size=args.window_size,
+            norm_warmup_steps=args.norm_warmup_steps
         )
         
         if success:

@@ -10,6 +10,31 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stock_env import StockTradingEnv
 from stable_baselines3.common.callbacks import BaseCallback
 
+# =============================================================================
+# PPO Model Architecture Configuration
+# Modify these values to control model complexity and size
+#
+# Examples:
+# - For simple/faster training: PPO_NETWORK_DEPTH = 2, PPO_NETWORK_WIDTH_MULTIPLIER = 1.0
+# - For complex/better performance: PPO_NETWORK_DEPTH = 4, PPO_NETWORK_WIDTH_MULTIPLIER = 3.0
+# - For memory-constrained: Reduce PPO_MAX_HIDDEN_DIM
+# =============================================================================
+
+# Network depth (number of hidden layers)
+PPO_NETWORK_DEPTH = 2  # Options: 2, 3, 4, 5
+
+# Network width multiplier (relative to observation dimension)
+PPO_NETWORK_WIDTH_MULTIPLIER = 1.5  # Options: 1.0, 1.5, 2.0, 3.0
+
+# Minimum and maximum hidden dimension sizes
+PPO_MIN_HIDDEN_DIM = 64
+PPO_MAX_HIDDEN_DIM = 512
+
+# LSTM hidden size for RecurrentPPO (only affects LSTM models)
+PPO_LSTM_HIDDEN_SIZE = 128
+
+# =============================================================================
+
 class DebugValueCallback(BaseCallback):
     def __init__(self, verbose=0):
         super().__init__(verbose)
@@ -92,8 +117,12 @@ def download_data(ticker, start_date, end_date):
     data = data.dropna()
     return data
 
-def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_date=None, continue_training=False, timesteps=10000, ticker="AAPL", custom_metadata_path=None, market_ticker=None, market_tickers=None, reward_metric='profit', ent_coef=0.01, sma_length=50, long_only=False, trading_fee_pct=0.0001, trace=False, normalization_start_date=None, normalization_end_date=None, load_normalization=False, initial_balance=10000, execution_model='next-open'):
+def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_date=None, continue_training=False, timesteps=10000, ticker="AAPL", custom_metadata_path=None, market_ticker=None, market_tickers=None, reward_metric='profit', ent_coef=0.01, sma_length=50, long_only=True, trading_fee_pct=0.0001, trace=False, normalization_start_date=None, normalization_end_date=None, load_normalization=False, initial_balance=10000, execution_model='next-open', algorithm='RecurrentPPO', learning_rate=3e-4, binary_action=False, network_depth=None):
     # 1. Validate normalization requirements
+    
+    # Use provided network_depth or fall back to global default
+    if network_depth is None:
+        network_depth = PPO_NETWORK_DEPTH
     
     if start_date is None:
         start_date = "2021-01-01"
@@ -205,7 +234,7 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
     print(f"Loading frozen stats from {stats_path}...")
     
     # Create the training environment with full data (including lookback) and start_step
-    env = DummyVecEnv([lambda: StockTradingEnv(df_full, window_size=window_size, market_dfs=market_dfs_full, reward_metric=reward_metric, sma_length=sma_length, long_only=long_only, trading_fee_pct=trading_fee_pct, trace=trace, initial_balance=initial_balance, start_step=train_start_idx, execution_model=execution_model)])
+    env = DummyVecEnv([lambda: StockTradingEnv(df_full, window_size=window_size, market_dfs=market_dfs_full, reward_metric=reward_metric, sma_length=sma_length, long_only=long_only, trading_fee_pct=trading_fee_pct, trace=trace, initial_balance=initial_balance, start_step=train_start_idx, execution_model=execution_model, binary_action=binary_action)])
     
     # Load the pre-generated normalization stats with error handling
     try:
@@ -225,9 +254,9 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
         else:
             raise
     
-    # CRITICAL: Freeze observation stats to prevent drift, but keep reward normalization active
+    # CRITICAL: Freeze observation stats to prevent drift
     env.training = False  # Disable updates to observation running stats
-    env.norm_reward = True  # Keep reward normalization active
+    env.norm_reward = False  # Disable reward normalization for interpretable rewards
     
     print(f"✓ Loaded normalization stats (FROZEN). Obs Mean (first 5): {env.obs_rms.mean[:5]}")
     print(f"✓ Loaded normalization stats (FROZEN). Obs Var (first 5): {env.obs_rms.var[:5]}")
@@ -244,6 +273,7 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
     
     # Load total timesteps from existing metadata if available
     total_timesteps_so_far = 0
+    original_learning_rate = None
     metadata_path = custom_metadata_path or os.path.join(models_dir, f"{model_name}_metadata.json")
     if os.path.exists(metadata_path):
         try:
@@ -252,6 +282,8 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
                 if "total_timesteps" in existing_meta:
                     total_timesteps_so_far = existing_meta["total_timesteps"]
                     print(f"Found existing training history: {total_timesteps_so_far} timesteps completed previously")
+                if "learning_rate" in existing_meta:
+                    original_learning_rate = existing_meta["learning_rate"]
         except Exception as e:
             print(f"Warning: Could not read existing timesteps from metadata: {e}")
 
@@ -276,80 +308,139 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
             env = VecNormalize.load(stats_path, env)
             # We need to set training mode to True for continued training
             env.training = True
-            env.norm_reward = True
+            env.norm_reward = False  # Disable reward normalization for interpretable rewards
             
         # Check if metadata says it's PPO or RecurrentPPO
         # For now, we assume if we are continuing, we stick to the class we are using.
         # But if the user wants to switch architecture on an existing model, that's hard.
         # We will assume we are loading a RecurrentPPO model if we are here.
         try:
-            model = RecurrentPPO.load(model_path + ".zip", env=env)
+            if algorithm == "RecurrentPPO":
+                model = RecurrentPPO.load(model_path + ".zip", env=env)
+            else:
+                model = PPO.load(model_path + ".zip", env=env)
+            
             # Update exploration parameter if provided
             model.ent_coef = ent_coef
             
-            # Force reset log_std if ent_coef is high to break deterministic behavior
-            if ent_coef >= 0.1:
-                print("High entropy coefficient detected. Resetting policy log_std to force exploration.")
-                # Access the policy network
-                # For MlpLstmPolicy, the action distribution is usually DiagGaussian
-                # We can try to reset the log_std parameter
-                try:
-                    import torch
-                    # Reset log_std to 0 (std=1)
-                    # Note: This depends on the internal structure of the policy
-                    if hasattr(model.policy, 'log_std'):
-                        with torch.no_grad():
-                            model.policy.log_std.fill_(0.0)
-                    elif hasattr(model.policy, 'action_dist'):
-                         if hasattr(model.policy.action_dist, 'log_std'):
-                             with torch.no_grad():
-                                 model.policy.action_dist.log_std.fill_(0.0)
-                except Exception as e:
-                    print(f"Could not reset log_std: {e}")
+            # Check if learning rate changed
+            learning_rate_changed = (original_learning_rate is not None and 
+                                   abs(original_learning_rate - learning_rate) > 1e-6)
+            
+            if learning_rate_changed:
+                print(f"⚠️  WARNING: Learning rate changed from {original_learning_rate} to {learning_rate}")
+                print("⚠️  Learning rate changes during continue training may not take effect properly")
+                print("⚠️  due to optimizer state. Consider training from scratch with new learning rate.")
+            
+            model.learning_rate = learning_rate
             
             print(f"Updated ent_coef to {ent_coef}")
+            print(f"Updated learning_rate to {learning_rate}")
+            
+            # Print network architecture
+            obs_dim = env.observation_space.shape[0]
+            if algorithm == "RecurrentPPO":
+                hidden_dim = max(PPO_MIN_HIDDEN_DIM, min(PPO_MAX_HIDDEN_DIM, int(obs_dim * PPO_NETWORK_WIDTH_MULTIPLIER)))
+                hidden_layers = [hidden_dim] * network_depth
+                lstm_dim = PPO_LSTM_HIDDEN_SIZE
+                print(f"Network Architecture: Input Dim={obs_dim} -> [Pi/Vf: {hidden_layers}, LSTM: {lstm_dim}] (RecurrentPPO)")
+            else:  # PPO
+                hidden_dim = max(PPO_MIN_HIDDEN_DIM, min(PPO_MAX_HIDDEN_DIM, int(obs_dim * PPO_NETWORK_WIDTH_MULTIPLIER)))
+                hidden_layers = [hidden_dim] * network_depth
+                print(f"Network Architecture: Input Dim={obs_dim} -> [Pi/Vf: {hidden_layers}] (MLP)")
+            
+            # Try to update optimizer learning rate if it changed
+            if learning_rate_changed:
+                try:
+                    # Update the learning rate in the policy optimizer
+                    for param_group in model.policy.optimizer.param_groups:
+                        param_group['lr'] = learning_rate
+                    print(f"✓ Updated optimizer learning rate to {learning_rate}")
+                except Exception as e:
+                    print(f"⚠️  Could not update optimizer learning rate: {e}")
+            
+            # After loading model
+            print(f"Model entropy coef: {model.ent_coef}")
+            print(f"Model learning rate: {model.learning_rate}")
+            print(f"Optimizer learning rate: {model.policy.optimizer.param_groups[0]['lr']}")
         except:
-            print("Failed to load as RecurrentPPO, trying PPO...")
-            model = PPO.load(model_path + ".zip", env=env)
+            print(f"Failed to load as {algorithm}, trying alternative...")
+            if algorithm == "RecurrentPPO":
+                model = PPO.load(model_path + ".zip", env=env)
+            else:
+                model = RecurrentPPO.load(model_path + ".zip", env=env)
             model.ent_coef = ent_coef
             
         reset_num_timesteps = False
     else:
-        print(f"Creating new RecurrentPPO (LSTM) model with ent_coef={ent_coef}...")
+        print(f"Creating new {algorithm} model with ent_coef={ent_coef}...")
         
-        # Dynamic network sizing based on input dimension
-        obs_dim = env.observation_space.shape[0]
+        if algorithm == "RecurrentPPO":
+            # Dynamic network sizing based on input dimension
+            obs_dim = env.observation_space.shape[0]
+            
+            # Use configurable network architecture
+            hidden_dim = max(PPO_MIN_HIDDEN_DIM, min(PPO_MAX_HIDDEN_DIM, int(obs_dim * PPO_NETWORK_WIDTH_MULTIPLIER)))
+            lstm_dim = PPO_LSTM_HIDDEN_SIZE
+            
+            # Create network architecture based on depth
+            hidden_layers = [hidden_dim] * network_depth
+            
+            print(f"Network Architecture: Input Dim={obs_dim} -> [Pi/Vf: {hidden_layers}, LSTM: {lstm_dim}] (RecurrentPPO)")
+            
+            policy_kwargs = dict(
+                net_arch=dict(pi=hidden_layers, vf=hidden_layers),
+                lstm_hidden_size=lstm_dim,
+                enable_critic_lstm=True,  # Use LSTM for critic too
+            )
+            
+            model = RecurrentPPO(
+                "MlpLstmPolicy", 
+                env, 
+                policy_kwargs=policy_kwargs, 
+                verbose=1,
+                ent_coef=ent_coef,  # Encourage exploration
+                learning_rate=learning_rate,
+                n_steps=2048,  # Increase rollout length for better generalization
+                batch_size=64,  # Smaller batch size for more gradient updates
+                n_epochs=10,  # Multiple passes over data
+                gamma=0.99,  # Discount factor
+                gae_lambda=0.95,  # GAE parameter
+                clip_range=0.2,  # PPO clipping
+                max_grad_norm=0.5,  # Gradient clipping to prevent exploding gradients
+                vf_coef=0.5,  # Value function coefficient
+            )
+        else:  # algorithm == "PPO"
+            # Use configurable network architecture
+            obs_dim = env.observation_space.shape[0]
+            hidden_dim = max(PPO_MIN_HIDDEN_DIM, min(PPO_MAX_HIDDEN_DIM, int(obs_dim * PPO_NETWORK_WIDTH_MULTIPLIER)))
+            
+            # Create network architecture based on depth
+            hidden_layers = [hidden_dim] * network_depth
+            
+            print(f"Network Architecture: Input Dim={obs_dim} -> [Pi/Vf: {hidden_layers}] (MLP)")
+            
+            policy_kwargs = dict(
+                net_arch=dict(pi=hidden_layers, vf=hidden_layers),
+            )
+            
+            model = PPO(
+                "MlpPolicy", 
+                env, 
+                policy_kwargs=policy_kwargs, 
+                verbose=1,
+                ent_coef=ent_coef,  # Encourage exploration
+                learning_rate=learning_rate,
+                n_steps=2048,  # Increase rollout length for better generalization
+                batch_size=64,  # Smaller batch size for more gradient updates
+                n_epochs=10,  # Multiple passes over data
+                gamma=0.99,  # Discount factor
+                gae_lambda=0.95,  # GAE parameter
+                clip_range=0.2,  # PPO clipping
+                max_grad_norm=0.5,  # Gradient clipping to prevent exploding gradients
+                vf_coef=0.5,  # Value function coefficient
+            )
         
-        # Heuristic: 
-        # Hidden layers = 2x input size (min 64, max 512)
-        # LSTM size = 4x input size (min 128, max 1024)
-        hidden_dim = max(64, min(512, int(obs_dim * 2)))
-        lstm_dim = max(128, min(1024, int(obs_dim * 4)))
-        
-        print(f"Network Architecture: Input Dim={obs_dim} -> [Pi/Vf: {hidden_dim}x{hidden_dim}x{hidden_dim}, LSTM: {lstm_dim}]")
-        
-        policy_kwargs = dict(
-            net_arch=dict(pi=[hidden_dim, hidden_dim, hidden_dim], vf=[hidden_dim, hidden_dim, hidden_dim]),
-            lstm_hidden_size=lstm_dim,
-            enable_critic_lstm=True,  # Use LSTM for critic too
-        )
-        
-        model = RecurrentPPO(
-            "MlpLstmPolicy", 
-            env, 
-            policy_kwargs=policy_kwargs, 
-            verbose=1,
-            ent_coef=ent_coef,  # Encourage exploration
-            learning_rate=3e-4,
-            n_steps=2048,  # Increase rollout length for better generalization
-            batch_size=64,  # Smaller batch size for more gradient updates
-            n_epochs=10,  # Multiple passes over data
-            gamma=0.99,  # Discount factor
-            gae_lambda=0.95,  # GAE parameter
-            clip_range=0.2,  # PPO clipping
-            max_grad_norm=0.5,  # Gradient clipping to prevent exploding gradients
-            vf_coef=0.5,  # Value function coefficient
-        )
         reset_num_timesteps = True
 
     # 4. Train
@@ -383,7 +474,14 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
         "window_size": window_size,
         "sma_length": sma_length,
         "long_only": long_only,
-        "algorithm": "RecurrentPPO",
+        "binary_action": binary_action,
+        "algorithm": algorithm,
+        "learning_rate": learning_rate,
+        "network_depth": network_depth,
+        "network_width_multiplier": PPO_NETWORK_WIDTH_MULTIPLIER,
+        "min_hidden_dim": PPO_MIN_HIDDEN_DIM,
+        "max_hidden_dim": PPO_MAX_HIDDEN_DIM,
+        "lstm_hidden_size": PPO_LSTM_HIDDEN_SIZE,
         "normalization_stats": stats_filename,
         "reward_metric": reward_metric,
         "ent_coef": ent_coef,
@@ -400,7 +498,8 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
         "normalization_period": {
             "start_date": normalization_start_date,
             "end_date": normalization_end_date
-        } if normalization_start_date and normalization_end_date else None
+        } if normalization_start_date and normalization_end_date else None,
+        "last_trained": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     
     if custom_metadata_path:

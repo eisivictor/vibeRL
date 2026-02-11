@@ -9,6 +9,7 @@ import os
 import json
 import numpy as np
 from datetime import datetime, timedelta
+from fast_inference import FastInferenceEngine, export_model_to_onnx
 
 def download_data(ticker, start_date, end_date):
     # yfinance end parameter is exclusive, so add 1 day to include end_date
@@ -22,7 +23,7 @@ def download_data(ticker, start_date, end_date):
     data = data.dropna()
     return data
 
-def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=False, trace=False, _user_provided_dates=None, allow_norm_mismatch=False, initial_balance=None, mark_date=None, use_plotly=False, execution_model='close', debug=False):
+def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=False, trace=False, _user_provided_dates=None, allow_norm_mismatch=False, initial_balance=None, mark_date=None, use_plotly=False, execution_model='close', debug=False, fast_inference=False):
     # Load configuration
     if not os.path.exists(config_path):
         print(f"Config file not found: {config_path}")
@@ -130,7 +131,8 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
     
     window_size = config.get("window_size", 5)
     sma_length = config.get("sma_length", 50)
-    long_only = config.get("long_only", False)
+    long_only = config.get("long_only", True)
+    binary_action = config.get("binary_action", False)
     trading_fee = config.get("trading_fee", 0.0001)
     model_name = config.get("model_name", "ppo_stock_trader")
     stats_filename = config.get("normalization_stats")
@@ -151,6 +153,8 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
         market_tickers = [market_ticker]
     
     print(f"Loading model '{model_name}' with window_size={window_size} from config...")
+    if binary_action:
+        print("Running in BINARY ACTION mode (all-in/all-out trading).")
     if stochastic:
         print("Running in STOCHASTIC mode (exploration enabled).")
     else:
@@ -290,7 +294,7 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
     
     # Create test environment with full data (including lookback period)
     # Pass start_step to begin trading from the actual test period start
-    test_env_raw = DummyVecEnv([lambda: StockTradingEnv(df_full, window_size=window_size, market_dfs=market_dfs_full, sma_length=sma_length, long_only=long_only, trading_fee_pct=trading_fee, initial_balance=initial_balance, start_step=test_start_idx, trace=trace, execution_model=execution_model)])
+    test_env_raw = DummyVecEnv([lambda: StockTradingEnv(df_full, window_size=window_size, market_dfs=market_dfs_full, sma_length=sma_length, long_only=long_only, trading_fee_pct=trading_fee, initial_balance=initial_balance, start_step=test_start_idx, trace=trace, execution_model=execution_model, binary_action=binary_action)])
     
     # Load the pre-generated normalization stats with error handling
     try:
@@ -335,6 +339,17 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
         print("Loading PPO model...")
         model = PPO.load(model_path + ".zip")
 
+    # Initialize fast inference engine if requested
+    fast_engine = None
+    if fast_inference:
+        onnx_path = model_path + ".onnx"
+        if not os.path.exists(onnx_path):
+            print("Exporting model to ONNX format for fast inference...")
+            export_model_to_onnx(model, env, onnx_path)
+        print("Initializing fast inference engine with Intel GPU acceleration...")
+        fast_engine = FastInferenceEngine(onnx_path, config_path)
+        print("✓ Fast inference ready!")
+
     obs = env.reset()
     
     # LSTM states
@@ -376,11 +391,21 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
         dates.append(current_date)
         
         if algorithm == "RecurrentPPO":
-            action, lstm_states = model.predict(obs, state=lstm_states, episode_start=episode_starts, deterministic=not stochastic)
-            # After first step, set episode_starts to False so LSTM maintains state within the episode
-            episode_starts = np.zeros((num_envs,), dtype=bool)
+            if fast_engine:
+                # Use fast inference engine (no LSTM state support)
+                action = fast_engine.predict(obs, deterministic=not stochastic)
+                action = np.array([action])  # Convert to expected format
+            else:
+                action, lstm_states = model.predict(obs, state=lstm_states, episode_start=episode_starts, deterministic=not stochastic)
+                # After first step, set episode_starts to False so LSTM maintains state within the episode
+                episode_starts = np.zeros((num_envs,), dtype=bool)
         else:
-            action, _states = model.predict(obs, deterministic=not stochastic)
+            if fast_engine:
+                # Use fast inference engine
+                action = fast_engine.predict(obs, deterministic=not stochastic)
+                action = np.array([action])  # Convert to expected format
+            else:
+                action, _states = model.predict(obs, deterministic=not stochastic)
             
         action_val = float(action[0])
         
@@ -471,10 +496,9 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
         # Get execution price based on execution model
         if execution_model == 'next-open':
             # For next-open: execution happens at next bar's open
-            # Check if there's a next bar
-            if step_counter < len(dates) - 1:
-                next_date = dates[step_counter + 1]
-                execution_price = df_full[df_full['Date'] == next_date]['Open'].iloc[0]
+            # Use current_step_idx captured BEFORE the step (not after, since env has advanced)
+            if current_step_idx + 1 < len(df_full):
+                execution_price = df_full.iloc[current_step_idx + 1]['Open']
                 execution_info = f" (exec@next-open ${execution_price:.2f})"
             else:
                 # Last bar, executed at current close

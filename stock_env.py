@@ -9,7 +9,7 @@ class StockTradingEnv(gym.Env):
     """A stock trading environment for Gymnasium"""
     metadata = {'render_modes': ['human']}
 
-    def __init__(self, df, window_size=5, initial_balance=10000, max_steps=None, trading_fee_pct=0.0001, market_df=None, market_dfs=None, reward_metric='profit', sma_length=50, long_only=False, trace=False, start_step=None, execution_model='next-open'):
+    def __init__(self, df, window_size=5, initial_balance=10000, max_steps=None, trading_fee_pct=0.0001, market_df=None, market_dfs=None, reward_metric='profit', sma_length=50, long_only=True, trace=False, start_step=None, execution_model='next-open', binary_action=False):
         super(StockTradingEnv, self).__init__()
 
         self.df = df.copy()
@@ -25,6 +25,10 @@ class StockTradingEnv(gym.Env):
         # Execution model: 'next-open' = execute at next bar open (default, realistic)
         #                  'close' = execute at current bar close (for backtesting)
         self.execution_model = execution_model
+        
+        # Binary action mode: convert continuous actions to discrete all-in/all-out
+        # When True: action > 0 = 100% invested, action <= 0 = 0% invested (all cash)
+        self.binary_action = binary_action
         
         # Handle multiple market dataframes
         self.market_dfs = []
@@ -83,13 +87,14 @@ class StockTradingEnv(gym.Env):
         self.action_space = spaces.Box(low=-1, high=1, shape=(1,), dtype=np.float32)
 
         # Observation space: 
-        # [Balance, Shares Held, Current Price, window_size previous closes, ...indicators, ...market_features]
+        # [Balance, Shares Held, Current Price, window_size previous closes, ...indicators for all window, ...market_features for all window]
         self.window_size = window_size
         
         original_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close']
         self.indicator_cols = [c for c in self.df.columns if c not in original_cols and c != 'Date']
         
-        self.obs_shape = 3 + self.window_size + len(self.indicator_cols) + self.market_features_len
+        # Expanded: include indicators and market features for ALL window steps
+        self.obs_shape = 3 + self.window_size + (len(self.indicator_cols) * self.window_size) + (self.market_features_len * self.window_size)
         
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(self.obs_shape,), dtype=np.float32
@@ -147,28 +152,37 @@ class StockTradingEnv(gym.Env):
         else:
             window = self.df.iloc[self.current_step - self.window_size : self.current_step]['Close'].values
         
-        # Get indicators for the current step
-        indicators = self.df.iloc[self.current_step][self.indicator_cols].values
+        # Get indicators for ALL window steps (expanded approach)
+        window_indicators = []
+        for i in range(self.current_step - self.window_size, self.current_step):
+            if i >= 0:  # Ensure we don't go before the start of data
+                step_indicators = self.df.iloc[i][self.indicator_cols].values
+                window_indicators.extend(step_indicators)
+            else:
+                # Pad with zeros if we don't have enough historical data
+                window_indicators.extend([0.0] * len(self.indicator_cols))
         
-        # Get market features if available
-        market_features = []
+        # Get market features for ALL window steps (expanded approach)
+        window_market_features = []
         if self.market_dfs:
-            for i, m_df in enumerate(self.market_dfs):
-                cols = self.market_cols_list[i]
-                if self.current_step < len(m_df):
-                    feats = m_df.iloc[self.current_step][cols].values
-                    market_features.extend(feats)
-                else:
-                    # Fallback if out of bounds (shouldn't happen if aligned)
-                    market_features.extend(np.zeros(len(cols)))
+            for step_offset in range(self.window_size):
+                step_idx = self.current_step - self.window_size + step_offset
+                for i, m_df in enumerate(self.market_dfs):
+                    cols = self.market_cols_list[i]
+                    if step_idx >= 0 and step_idx < len(m_df):
+                        feats = m_df.iloc[step_idx][cols].values
+                        window_market_features.extend(feats)
+                    else:
+                        # Pad with zeros if out of bounds
+                        window_market_features.extend([0.0] * len(cols))
         
         obs = np.array([
             self.balance,
             self.shares_held,
             price_ratio,
             *window,
-            *indicators,
-            *market_features
+            *window_indicators,
+            *window_market_features
         ], dtype=np.float32)
         
         return obs
@@ -180,7 +194,22 @@ class StockTradingEnv(gym.Env):
         # 0.0 = 100% Cash
         target_weight = float(action[0])
         
-        if self.long_only:
+        if self.binary_action:
+            # Binary mode: convert to discrete all-in (1.0) or all-out (0.0)
+            # Threshold at 0 to make decision
+            if self.long_only:
+                # For long_only: action > 0 means invest, action <= 0 means cash
+                target_weight = 1.0 if target_weight > 0 else 0.0
+            else:
+                # For long/short: action > 0.5 = long, action < -0.5 = short, else cash
+                if target_weight > 0.5:
+                    target_weight = 1.0  # Full long
+                elif target_weight < -0.5:
+                    target_weight = -1.0  # Full short
+                else:
+                    target_weight = 0.0  # Cash
+        elif self.long_only:
+            # Continuous mode with long_only
             # Map [-1, 1] to [0, 1]
             # We map -1 to 0 (Cash) and 1 to 1 (Full Long)
             # This means 0 (untrained) maps to 0.5 (50% invested)
@@ -237,7 +266,11 @@ class StockTradingEnv(gym.Env):
                 # But first try the target
                 shares_to_trade = int(value_to_trade / (execution_price * (1 + self.trading_fee_pct)))
             else:  # Selling
-                shares_to_trade = int(value_to_trade / execution_price)
+                # Special case: if target is 0 (full cash), sell all shares
+                if abs(target_weight) < 0.001:  # Target is essentially 0
+                    shares_to_trade = -self.shares_held
+                else:
+                    shares_to_trade = int(value_to_trade / execution_price)
             
             if shares_to_trade != 0:
                 trade_value = abs(shares_to_trade * execution_price)
