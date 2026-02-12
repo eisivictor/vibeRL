@@ -9,7 +9,6 @@ import os
 import json
 import numpy as np
 from datetime import datetime, timedelta
-from fast_inference import FastInferenceEngine, export_model_to_onnx
 
 def download_data(ticker, start_date, end_date):
     # yfinance end parameter is exclusive, so add 1 day to include end_date
@@ -23,7 +22,7 @@ def download_data(ticker, start_date, end_date):
     data = data.dropna()
     return data
 
-def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=False, trace=False, _user_provided_dates=None, allow_norm_mismatch=False, initial_balance=None, mark_date=None, use_plotly=False, execution_model='close', debug=False, fast_inference=False):
+def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=False, trace=False, _user_provided_dates=None, allow_norm_mismatch=False, initial_balance=None, mark_date=None, use_plotly=False, execution_model='close', debug=False):
     # Load configuration
     if not os.path.exists(config_path):
         print(f"Config file not found: {config_path}")
@@ -339,17 +338,6 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
         print("Loading PPO model...")
         model = PPO.load(model_path + ".zip")
 
-    # Initialize fast inference engine if requested
-    fast_engine = None
-    if fast_inference:
-        onnx_path = model_path + ".onnx"
-        if not os.path.exists(onnx_path):
-            print("Exporting model to ONNX format for fast inference...")
-            export_model_to_onnx(model, env, onnx_path)
-        print("Initializing fast inference engine with Intel GPU acceleration...")
-        fast_engine = FastInferenceEngine(onnx_path, config_path)
-        print("✓ Fast inference ready!")
-
     obs = env.reset()
     
     # LSTM states
@@ -391,21 +379,11 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
         dates.append(current_date)
         
         if algorithm == "RecurrentPPO":
-            if fast_engine:
-                # Use fast inference engine (no LSTM state support)
-                action = fast_engine.predict(obs, deterministic=not stochastic)
-                action = np.array([action])  # Convert to expected format
-            else:
-                action, lstm_states = model.predict(obs, state=lstm_states, episode_start=episode_starts, deterministic=not stochastic)
-                # After first step, set episode_starts to False so LSTM maintains state within the episode
-                episode_starts = np.zeros((num_envs,), dtype=bool)
+            action, lstm_states = model.predict(obs, state=lstm_states, episode_start=episode_starts, deterministic=not stochastic)
+            # After first step, set episode_starts to False so LSTM maintains state within the episode
+            episode_starts = np.zeros((num_envs,), dtype=bool)
         else:
-            if fast_engine:
-                # Use fast inference engine
-                action = fast_engine.predict(obs, deterministic=not stochastic)
-                action = np.array([action])  # Convert to expected format
-            else:
-                action, _states = model.predict(obs, deterministic=not stochastic)
+            action, _states = model.predict(obs, deterministic=not stochastic)
             
         action_val = float(action[0])
         

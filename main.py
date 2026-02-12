@@ -342,11 +342,11 @@ def main():
     parser.add_argument('--mark-date', type=str, default=None, help="Draw a vertical line on the chart at this date (YYYY-MM-DD)")
     parser.add_argument('--execution-model', type=str, default='next-open', choices=['close', 'next-open'], help="Execution model: 'next-open' = execute at next bar open (default, realistic), 'close' = execute at bar close (backtesting)")
     parser.add_argument('--debug', action='store_true', help="Enable debug trace plot mode (plots trace file target along with stock price)")
-    parser.add_argument('--fast-inference', action='store_true', help="Use ONNX Runtime with OpenVINO for GPU-accelerated inference (Intel integrated graphics)")
     parser.add_argument('--trace-file', type=str, help="Path to trace file for invest mode (default: trace_{model_name}.csv)")
     parser.add_argument('--no-show-plot', action='store_true', help="Don't show the performance plot when running invest mode")
     parser.add_argument('--plotly', action='store_true', help="Generate interactive Plotly chart (behavior depends on mode)")
     parser.add_argument('--network_depth', type=int, default=None, choices=[2, 3, 4, 5], help="Network depth (number of hidden layers) for PPO models (default: 2)")
+    parser.add_argument('--lstm_hidden_size', type=int, default=None, help="LSTM hidden layer size for RecurrentPPO (default: 128)")
     
     args = parser.parse_args()
     
@@ -568,7 +568,8 @@ def main():
             execution_model=args.execution_model,
             learning_rate=args.learning_rate,
             binary_action=args.binary_action,
-            network_depth=args.network_depth
+            network_depth=args.network_depth,
+            lstm_hidden_size=args.lstm_hidden_size
         )
     elif args.mode == 'test':
         if not args.config:
@@ -593,8 +594,7 @@ def main():
             mark_date=args.mark_date,
             use_plotly=args.plotly,
             execution_model=args.execution_model,
-            debug=args.debug,
-            fast_inference=args.fast_inference
+            debug=args.debug
         )
     elif args.mode == 'test_s':
         if not args.config:

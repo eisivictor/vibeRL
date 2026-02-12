@@ -117,12 +117,16 @@ def download_data(ticker, start_date, end_date):
     data = data.dropna()
     return data
 
-def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_date=None, continue_training=False, timesteps=10000, ticker="AAPL", custom_metadata_path=None, market_ticker=None, market_tickers=None, reward_metric='profit', ent_coef=0.01, sma_length=50, long_only=True, trading_fee_pct=0.0001, trace=False, normalization_start_date=None, normalization_end_date=None, load_normalization=False, initial_balance=10000, execution_model='next-open', algorithm='RecurrentPPO', learning_rate=3e-4, binary_action=False, network_depth=None):
+def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_date=None, continue_training=False, timesteps=10000, ticker="AAPL", custom_metadata_path=None, market_ticker=None, market_tickers=None, reward_metric='profit', ent_coef=0.01, sma_length=50, long_only=True, trading_fee_pct=0.0001, trace=False, normalization_start_date=None, normalization_end_date=None, load_normalization=False, initial_balance=10000, execution_model='next-open', algorithm='RecurrentPPO', learning_rate=3e-4, binary_action=False, network_depth=None, lstm_hidden_size=None):
     # 1. Validate normalization requirements
     
     # Use provided network_depth or fall back to global default
     if network_depth is None:
         network_depth = PPO_NETWORK_DEPTH
+    
+    # Use provided lstm_hidden_size or fall back to global default
+    if lstm_hidden_size is None:
+        lstm_hidden_size = PPO_LSTM_HIDDEN_SIZE
     
     if start_date is None:
         start_date = "2021-01-01"
@@ -342,8 +346,7 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
             if algorithm == "RecurrentPPO":
                 hidden_dim = max(PPO_MIN_HIDDEN_DIM, min(PPO_MAX_HIDDEN_DIM, int(obs_dim * PPO_NETWORK_WIDTH_MULTIPLIER)))
                 hidden_layers = [hidden_dim] * network_depth
-                lstm_dim = PPO_LSTM_HIDDEN_SIZE
-                print(f"Network Architecture: Input Dim={obs_dim} -> [Pi/Vf: {hidden_layers}, LSTM: {lstm_dim}] (RecurrentPPO)")
+                print(f"Network Architecture: Input Dim={obs_dim} -> [Pi/Vf: {hidden_layers}, LSTM: {lstm_hidden_size}] (RecurrentPPO)")
             else:  # PPO
                 hidden_dim = max(PPO_MIN_HIDDEN_DIM, min(PPO_MAX_HIDDEN_DIM, int(obs_dim * PPO_NETWORK_WIDTH_MULTIPLIER)))
                 hidden_layers = [hidden_dim] * network_depth
@@ -381,16 +384,15 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
             
             # Use configurable network architecture
             hidden_dim = max(PPO_MIN_HIDDEN_DIM, min(PPO_MAX_HIDDEN_DIM, int(obs_dim * PPO_NETWORK_WIDTH_MULTIPLIER)))
-            lstm_dim = PPO_LSTM_HIDDEN_SIZE
             
             # Create network architecture based on depth
             hidden_layers = [hidden_dim] * network_depth
             
-            print(f"Network Architecture: Input Dim={obs_dim} -> [Pi/Vf: {hidden_layers}, LSTM: {lstm_dim}] (RecurrentPPO)")
+            print(f"Network Architecture: Input Dim={obs_dim} -> [Pi/Vf: {hidden_layers}, LSTM: {lstm_hidden_size}] (RecurrentPPO)")
             
             policy_kwargs = dict(
                 net_arch=dict(pi=hidden_layers, vf=hidden_layers),
-                lstm_hidden_size=lstm_dim,
+                lstm_hidden_size=lstm_hidden_size,
                 enable_critic_lstm=True,  # Use LSTM for critic too
             )
             
@@ -481,7 +483,7 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
         "network_width_multiplier": PPO_NETWORK_WIDTH_MULTIPLIER,
         "min_hidden_dim": PPO_MIN_HIDDEN_DIM,
         "max_hidden_dim": PPO_MAX_HIDDEN_DIM,
-        "lstm_hidden_size": PPO_LSTM_HIDDEN_SIZE,
+        "lstm_hidden_size": lstm_hidden_size,
         "normalization_stats": stats_filename,
         "reward_metric": reward_metric,
         "ent_coef": ent_coef,

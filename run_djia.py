@@ -165,7 +165,7 @@ def get_last_action_from_log(log_file):
     except Exception as e:
         return None, None, f"Error reading log: {e}"
 
-def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=False, invest=False, plotly=False, execution_model='close', algorithm='RecurrentPPO', learning_rate=3e-4, config_suffix="", binary_action=False, network_depth=None, window_size=WINDOW_SIZE, norm_warmup_steps=WARMUP_STEPS):
+def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=False, invest=False, plotly=False, execution_model='close', algorithm='RecurrentPPO', learning_rate=3e-4, config_suffix="", binary_action=False, network_depth=None, lstm_hidden_size=None, window_size=WINDOW_SIZE, norm_warmup_steps=WARMUP_STEPS):
     """Process a single ticker: normalize, train, and test"""
     config_path = f"models/{ticker}{config_suffix}_djia"
     
@@ -200,6 +200,9 @@ def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=Fal
         if network_depth is not None:
             normalize_cmd.extend(["--network_depth", str(network_depth)])
         
+        if lstm_hidden_size is not None:
+            normalize_cmd.extend(["--lstm_hidden_size", str(lstm_hidden_size)])
+        
         if not run_command(normalize_cmd, f"Normalizing {ticker}"):
             return False, None
     
@@ -225,6 +228,9 @@ def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=Fal
         
         if network_depth is not None:
             train_cmd.extend(["--network_depth", str(network_depth)])
+        
+        if lstm_hidden_size is not None:
+            train_cmd.extend(["--lstm_hidden_size", str(lstm_hidden_size)])
         
         if not run_command(train_cmd, f"Training {ticker}"):
             return False, None
@@ -379,6 +385,8 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
                         help="Suffix to append to config/model names (e.g., 'v2' makes 'AAPL_v2_djia')")
     parser.add_argument("--network-depth", type=int, default=None, choices=[2, 3, 4, 5],
                         help=f"Network depth (number of hidden layers) for PPO models (default: {PPO_NETWORK_DEPTH})")
+    parser.add_argument("--lstm-hidden-size", type=int, default=None,
+                        help=f"LSTM hidden layer size for RecurrentPPO (default: {PPO_LSTM_HIDDEN_SIZE})")
     parser.add_argument("--window-size", type=int, default=WINDOW_SIZE,
                         help=f"Window size for observation (default: {WINDOW_SIZE})")
     parser.add_argument("--norm-warmup-steps", type=int, default=WARMUP_STEPS,
@@ -544,7 +552,7 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
     print(f"Network width multiplier: {PPO_NETWORK_WIDTH_MULTIPLIER}x")
     print(f"Hidden dim range: {PPO_MIN_HIDDEN_DIM}-{PPO_MAX_HIDDEN_DIM}")
     if args.algorithm == "RecurrentPPO":
-        print(f"LSTM hidden size: {PPO_LSTM_HIDDEN_SIZE}")
+        print(f"LSTM hidden size: {args.lstm_hidden_size if args.lstm_hidden_size else PPO_LSTM_HIDDEN_SIZE}")
     print(f"Entropy coefficient: {ENT_COEF}")
     print(f"Execution model: {args.execution_model}")
     print(f"Training timesteps: {TIMESTEPS:,}")
@@ -579,6 +587,7 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
             config_suffix=args.config_suffix,
             binary_action=args.binary_action,
             network_depth=args.network_depth,
+            lstm_hidden_size=args.lstm_hidden_size,
             window_size=args.window_size,
             norm_warmup_steps=args.norm_warmup_steps
         )
