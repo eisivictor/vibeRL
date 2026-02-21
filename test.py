@@ -754,6 +754,66 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
             outperformance = final_net_worth - final_bh_net_worth
             f.write(f"Agent vs Buy & Hold: ${outperformance:.2f} ({'outperformed' if outperformance > 0 else 'underperformed'})\n")
         
+        # --- In-Sample / Out-of-Sample Split ---
+        if mark_date and len(dates) > 0:
+            try:
+                mark_dt = pd.to_datetime(mark_date)
+                # Find the split index in our tracked dates
+                oos_mask = [d >= mark_dt for d in dates]
+                is_mask = [d < mark_dt for d in dates]
+                
+                oos_start_idx = next((i for i, m in enumerate(oos_mask) if m), None)
+                
+                if oos_start_idx is not None and oos_start_idx > 0 and oos_start_idx < len(net_worth_history) - 1:
+                    # In-sample: from start to mark_date
+                    # net_worth_history[0] = initial, net_worth_history[1] = after step 1, etc.
+                    is_final_nw = net_worth_history[oos_start_idx]  # NW at the split point
+                    is_return = ((is_final_nw / initial_balance - 1) * 100)
+                    
+                    # Out-of-sample: from mark_date to end
+                    oos_start_nw = is_final_nw  # Portfolio value entering OOS period
+                    oos_final_nw = final_net_worth
+                    oos_return = ((oos_final_nw / oos_start_nw - 1) * 100) if oos_start_nw > 0 else 0
+                    
+                    oos_days = sum(oos_mask)
+                    is_days = sum(is_mask)
+                    
+                    # Buy & Hold split
+                    is_bh_return_str = "N/A"
+                    oos_bh_return_str = "N/A"
+                    oos_bh_outperf_str = ""
+                    if buy_and_hold_net_worths and len(buy_and_hold_net_worths) > oos_start_idx:
+                        is_bh_nw = buy_and_hold_net_worths[oos_start_idx - 1] if oos_start_idx > 0 else initial_balance
+                        is_bh_return = ((is_bh_nw / initial_balance - 1) * 100)
+                        is_bh_return_str = f"{is_bh_return:.2f}%"
+                        
+                        oos_bh_start = is_bh_nw
+                        oos_bh_final = buy_and_hold_net_worths[-1]
+                        oos_bh_return = ((oos_bh_final / oos_bh_start - 1) * 100) if oos_bh_start > 0 else 0
+                        oos_bh_return_str = f"{oos_bh_return:.2f}%"
+                        oos_bh_outperf_str = f" (vs B&H {oos_bh_return_str})"
+                    
+                    # Count OOS trades
+                    oos_trades = sum(1 for line in action_log if any(line.startswith(str(d.date())) for d in dates[oos_start_idx:] if hasattr(d, 'date')))
+                    
+                    f.write("=" * 80 + "\n")
+                    f.write(f"IN-SAMPLE / OUT-OF-SAMPLE SPLIT (mark_date: {mark_date})\n")
+                    f.write("=" * 80 + "\n")
+                    f.write(f"In-Sample  ({is_days} days): Return {is_return:+.2f}% | B&H {is_bh_return_str} | NW ${is_final_nw:.2f}\n")
+                    f.write(f"Out-of-Sample ({oos_days} days): Return {oos_return:+.2f}%{oos_bh_outperf_str} | NW ${oos_start_nw:.2f} -> ${oos_final_nw:.2f}\n")
+                    f.write("=" * 80 + "\n")
+                    
+                    # Also print to console
+                    print(f"\n{'='*60}")
+                    print(f"  IN-SAMPLE / OUT-OF-SAMPLE SPLIT (mark: {mark_date})")
+                    print(f"{'='*60}")
+                    print(f"  In-Sample  ({is_days} days): Return {is_return:+.2f}%  (B&H {is_bh_return_str})")
+                    print(f"  Out-of-Sample ({oos_days} days): Return {oos_return:+.2f}%{oos_bh_outperf_str}")
+                    print(f"{'='*60}")
+                    
+            except Exception as e:
+                print(f"Warning: Could not compute in-sample/out-of-sample split: {e}")
+        
     print("Performance log saved to performance.log")
     print(f"Final Net Worth: ${final_net_worth:.2f}")
     

@@ -30,23 +30,25 @@ except ImportError:
 # MY stocks
 DJIA_TICKERS = [
     "AAPL",  # Apple
-    "MSFT",  # Microsoft
-    "PG",    # Procter & Gamble
-    "MRK",   # Merck
-    "CSCO",  # Cisco    
-    "REGN",  # Regeneron
-    "TSLA",  # Tesla
-    "NVDA",  # Nvidia
-    "AMZN",  # Amazon
-    "GOOGL", # Alphabet
-    "META",  # Meta Platforms
+    "NVDA",  # Nvidia    
     "MU",    # Micron Technology
+    "GOOGL", # Alphabet
     "NVO",   # Novo Nordisk
-    "XOM",   # Exxon Mobil
-    "ASML",  # ASML Holding
-    "TSM",   # Taiwan Semiconductor
-    "STX",   # Seagate Technology
     "WDC",   # Western Digital
+    "GEV",   # Genesis Energy
+    "SNDK",  # SanDisk
+    #"MSFT",  # Microsoft
+    #"PG",    # Procter & Gamble
+    #"MRK",   # Merck
+    #"CSCO",  # Cisco    
+    #"REGN",  # Regeneron
+    #"TSLA",  # Tesla
+    #"AMZN",  # Amazon
+    #"META",  # Meta Platforms
+    #"XOM",   # Exxon Mobil
+    #"ASML",  # ASML Holding
+    #"TSM",   # Taiwan Semiconductor
+    #"STX",   # Seagate Technology    
 ]
 
 # Configuration
@@ -58,6 +60,7 @@ TRADING_FEE = 0.001
 BUDGET = 10000
 TIMESTEPS = 50000
 WARMUP_STEPS = 10000
+DRAWDOWN_PENALTY = 0.0  # Drawdown penalty coefficient (0=disabled, try 0.5-2.0)
 UNSEEN_TEST_WEEKS = 2  # Number of weeks of unseen data for testing (data after training end)
 
 # Date ranges (calculated dynamically)
@@ -165,7 +168,7 @@ def get_last_action_from_log(log_file):
     except Exception as e:
         return None, None, f"Error reading log: {e}"
 
-def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=False, invest=False, plotly=False, execution_model='close', algorithm='RecurrentPPO', learning_rate=3e-4, config_suffix="", binary_action=False, network_depth=None, lstm_hidden_size=None, window_size=WINDOW_SIZE, norm_warmup_steps=WARMUP_STEPS):
+def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=False, invest=False, plotly=False, execution_model='close', algorithm='RecurrentPPO', learning_rate=3e-4, config_suffix="", binary_action=False, network_depth=None, lstm_hidden_size=None, drawdown_penalty=0.0, window_size=WINDOW_SIZE, norm_warmup_steps=WARMUP_STEPS):
     """Process a single ticker: normalize, train, and test"""
     config_path = f"models/{ticker}{config_suffix}_djia"
     
@@ -203,6 +206,9 @@ def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=Fal
         if lstm_hidden_size is not None:
             normalize_cmd.extend(["--lstm_hidden_size", str(lstm_hidden_size)])
         
+        if drawdown_penalty > 0:
+            normalize_cmd.extend(["--drawdown_penalty", str(drawdown_penalty)])
+        
         if not run_command(normalize_cmd, f"Normalizing {ticker}"):
             return False, None
     
@@ -231,6 +237,9 @@ def process_ticker(ticker, skip_normalize=False, skip_train=False, skip_test=Fal
         
         if lstm_hidden_size is not None:
             train_cmd.extend(["--lstm_hidden_size", str(lstm_hidden_size)])
+        
+        if drawdown_penalty > 0:
+            train_cmd.extend(["--drawdown_penalty", str(drawdown_penalty)])
         
         if not run_command(train_cmd, f"Training {ticker}"):
             return False, None
@@ -387,6 +396,8 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
                         help=f"Network depth (number of hidden layers) for PPO models (default: {PPO_NETWORK_DEPTH})")
     parser.add_argument("--lstm-hidden-size", type=int, default=None,
                         help=f"LSTM hidden layer size for RecurrentPPO (default: {PPO_LSTM_HIDDEN_SIZE})")
+    parser.add_argument("--drawdown-penalty", type=float, default=DRAWDOWN_PENALTY,
+                        help=f"Drawdown penalty coefficient for reward shaping (0=disabled, try 0.5-2.0, default: {DRAWDOWN_PENALTY})")
     parser.add_argument("--window-size", type=int, default=WINDOW_SIZE,
                         help=f"Window size for observation (default: {WINDOW_SIZE})")
     parser.add_argument("--norm-warmup-steps", type=int, default=WARMUP_STEPS,
@@ -554,6 +565,8 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
     if args.algorithm == "RecurrentPPO":
         print(f"LSTM hidden size: {args.lstm_hidden_size if args.lstm_hidden_size else PPO_LSTM_HIDDEN_SIZE}")
     print(f"Entropy coefficient: {ENT_COEF}")
+    if args.drawdown_penalty > 0:
+        print(f"Drawdown penalty: {args.drawdown_penalty}")
     print(f"Execution model: {args.execution_model}")
     print(f"Training timesteps: {TIMESTEPS:,}")
     print(f"Budget: ${BUDGET:,}")
@@ -588,6 +601,7 @@ The --unseen-weeks parameter controls how much test data the model hasn't seen d
             binary_action=args.binary_action,
             network_depth=args.network_depth,
             lstm_hidden_size=args.lstm_hidden_size,
+            drawdown_penalty=args.drawdown_penalty,
             window_size=args.window_size,
             norm_warmup_steps=args.norm_warmup_steps
         )

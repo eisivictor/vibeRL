@@ -9,12 +9,13 @@ class StockTradingEnv(gym.Env):
     """A stock trading environment for Gymnasium"""
     metadata = {'render_modes': ['human']}
 
-    def __init__(self, df, window_size=5, initial_balance=10000, max_steps=None, trading_fee_pct=0.0001, market_df=None, market_dfs=None, reward_metric='profit', sma_length=50, long_only=True, trace=False, start_step=None, execution_model='next-open', binary_action=False):
+    def __init__(self, df, window_size=5, initial_balance=10000, max_steps=None, trading_fee_pct=0.0001, market_df=None, market_dfs=None, reward_metric='profit', sma_length=50, long_only=True, trace=False, start_step=None, execution_model='next-open', binary_action=False, drawdown_penalty=0.0):
         super(StockTradingEnv, self).__init__()
 
         self.df = df.copy()
         self.trading_fee_pct = trading_fee_pct
         self.reward_metric = reward_metric
+        self.drawdown_penalty = drawdown_penalty  # Lambda coefficient for drawdown penalty term
         self.long_only = long_only
         self.trace = trace
         self.returns_history = deque(maxlen=50) # Rolling window for Sharpe calculation
@@ -37,18 +38,68 @@ class StockTradingEnv(gym.Env):
         elif market_df is not None:
             self.market_dfs = [market_df.copy()]
         
-        # Add indicators
+        # Add indicators - focused set of uncorrelated features
+        # Kept from original: RSI (momentum), ATR (volatility), MACD (trend), BBands %B (mean reversion)
+        # Removed redundant: SMA, EMA, Stochastic, BBL/BBM/BBU/BBB, MACDs, OBV
+        # Added new: ADX (trend strength), realized volatility, volume ratio, calendar features
+        
         if sma_length > 0:
-            self.df.ta.sma(length=sma_length, append=True)
-        self.df.ta.ema(length=20, append=True)
-        self.df.ta.macd(append=True)
-        self.df.ta.rsi(length=14, append=True)
-        self.df.ta.stoch(append=True)
-        self.df.ta.bbands(length=20, append=True)
-        self.df.ta.atr(length=14, append=True)
-        self.df.ta.obv(append=True)
+            self.df.ta.sma(length=sma_length, append=True)  # Still needed for price normalization
+        
+        # Core momentum & trend indicators (4 features)
+        self.df.ta.rsi(length=14, append=True)           # RSI - momentum oscillator
+        self.df.ta.macd(append=True)                      # MACD line + histogram (keep MACD_12_26_9 and MACDh, drop MACDs)
+        self.df.ta.bbands(length=20, append=True)         # We only keep BBP_20_2.0_2.0 (%B)
+        self.df.ta.atr(length=14, append=True)            # ATR - volatility
+        self.df.ta.adx(length=14, append=True)            # ADX - trend strength (NEW)
+        
+        # Realized volatility - rolling std of daily returns (NEW)
+        self.df['Returns'] = self.df['Close'].pct_change()
+        self.df['RealizedVol_20'] = self.df['Returns'].rolling(window=20).std() * np.sqrt(252)  # Annualized
+        
+        # Volume profile - volume relative to 20-day average (NEW)
+        vol_ma = self.df['Volume'].rolling(window=20).mean()
+        with np.errstate(divide='ignore', invalid='ignore'):
+            self.df['VolumeRatio'] = np.where(vol_ma > 0, self.df['Volume'] / vol_ma, 1.0)
+        
+        # Calendar features - cyclically encoded (NEW)
+        if 'Date' in self.df.columns:
+            dates = pd.to_datetime(self.df['Date'])
+            # Day of week: 0=Monday, 4=Friday -> encode as sin/cos
+            self.df['DayOfWeek_sin'] = np.sin(2 * np.pi * dates.dt.dayofweek / 5)
+            self.df['DayOfWeek_cos'] = np.cos(2 * np.pi * dates.dt.dayofweek / 5)
+            # Month: 1-12 -> encode as sin/cos
+            self.df['Month_sin'] = np.sin(2 * np.pi * dates.dt.month / 12)
+            self.df['Month_cos'] = np.cos(2 * np.pi * dates.dt.month / 12)
         
         self.df.fillna(0, inplace=True)
+        
+        # Remove redundant indicator columns to keep only the focused set
+        # Keep: RSI_14, MACD_12_26_9, MACDh_12_26_9, BBP_20_2.0_2.0, ATRr_14,
+        #       ADX_14, DMP_14, DMN_14, RealizedVol_20, VolumeRatio,
+        #       DayOfWeek_sin, DayOfWeek_cos, Month_sin, Month_cos, SMA_{sma_length}
+        # Remove: EMA, MACDs, STOCHk/d/h, BBL/BBM/BBU/BBB, OBV, Returns (intermediate)
+        cols_to_drop = []
+        for col in self.df.columns:
+            if col.startswith('MACDs_'):
+                cols_to_drop.append(col)
+            elif col.startswith('STOCHk_') or col.startswith('STOCHd_') or col.startswith('STOCHh_'):
+                cols_to_drop.append(col)
+            elif col.startswith('BBL_') or col.startswith('BBM_') or col.startswith('BBU_') or col.startswith('BBB_'):
+                cols_to_drop.append(col)
+            elif col.startswith('EMA_'):
+                cols_to_drop.append(col)
+            elif col.startswith('ADXR_'):  # Smoothed ADX, redundant with ADX
+                cols_to_drop.append(col)
+            elif col == 'OBV':
+                cols_to_drop.append(col)
+            elif col == 'Returns':  # Intermediate column, not needed as feature
+                cols_to_drop.append(col)
+        
+        # Only drop columns that exist
+        cols_to_drop = [c for c in cols_to_drop if c in self.df.columns]
+        if cols_to_drop:
+            self.df.drop(columns=cols_to_drop, inplace=True)
         
         # Store sma_length for use in observations
         self.sma_length = sma_length
@@ -64,7 +115,21 @@ class StockTradingEnv(gym.Env):
                 m_df.ta.sma(length=50, append=True)
                 m_df.fillna(0, inplace=True)
                 
-                # Select relevant market columns (Close + Indicators)
+                # Cross-asset momentum: relative strength vs market (NEW)
+                # Stock return - market return (computed per step in observation)
+                if 'Close' in m_df.columns and 'Close' in self.df.columns:
+                    m_returns = m_df['Close'].pct_change().fillna(0)
+                    s_returns = self.df['Close'].pct_change().fillna(0)
+                    # Align lengths (take min length)
+                    min_len = min(len(m_returns), len(s_returns))
+                    rel_strength = s_returns.iloc[:min_len].values - m_returns.iloc[:min_len].values
+                    # Rolling 20-day relative strength
+                    rel_strength_series = pd.Series(rel_strength)
+                    m_df['RelStrength_20'] = 0.0  # Initialize
+                    m_df.loc[:min_len-1, 'RelStrength_20'] = rel_strength_series.rolling(window=20, min_periods=1).mean().values
+                    m_df['RelStrength_20'] = m_df['RelStrength_20'].fillna(0)
+                
+                # Select relevant market columns (Close + Indicators + RelStrength)
                 market_original_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close']
                 cols = [c for c in m_df.columns if c not in market_original_cols and c != 'Date']
                 # Add Market Close as well
@@ -115,6 +180,7 @@ class StockTradingEnv(gym.Env):
         self.shares_held = 0
         self.net_worth = self.initial_balance
         self.max_net_worth = self.initial_balance
+        self.peak_net_worth = self.initial_balance  # Track peak for drawdown penalty
         self.current_step = self.initial_step
         
         # Track history for rendering
@@ -419,6 +485,13 @@ class StockTradingEnv(gym.Env):
         
         if self.net_worth > self.max_net_worth:
             self.max_net_worth = self.net_worth
+
+        # Update peak and apply drawdown penalty to reward
+        if self.net_worth > self.peak_net_worth:
+            self.peak_net_worth = self.net_worth
+        if self.drawdown_penalty > 0 and self.peak_net_worth > 0:
+            drawdown = (self.peak_net_worth - self.net_worth) / self.peak_net_worth
+            reward -= self.drawdown_penalty * max(0.0, drawdown)
 
         observation = self._next_observation()
         info = {'net_worth': self.net_worth}

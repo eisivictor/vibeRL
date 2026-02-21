@@ -347,6 +347,7 @@ def main():
     parser.add_argument('--plotly', action='store_true', help="Generate interactive Plotly chart (behavior depends on mode)")
     parser.add_argument('--network_depth', type=int, default=None, choices=[2, 3, 4, 5], help="Network depth (number of hidden layers) for PPO models (default: 2)")
     parser.add_argument('--lstm_hidden_size', type=int, default=None, help="LSTM hidden layer size for RecurrentPPO (default: 128)")
+    parser.add_argument('--drawdown_penalty', type=float, default=0.0, help="Drawdown penalty coefficient added to reward (0=disabled, try 0.5-2.0)")
     
     args = parser.parse_args()
     
@@ -569,7 +570,8 @@ def main():
             learning_rate=args.learning_rate,
             binary_action=args.binary_action,
             network_depth=args.network_depth,
-            lstm_hidden_size=args.lstm_hidden_size
+            lstm_hidden_size=args.lstm_hidden_size,
+            drawdown_penalty=args.drawdown_penalty
         )
     elif args.mode == 'test':
         if not args.config:
