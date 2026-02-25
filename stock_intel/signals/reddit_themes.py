@@ -38,10 +38,11 @@ SCAN_SUBS = [
     "datascience",
 ]
 
-POSTS_PER_SUB  = 50   # how many posts to fetch per sub
+POSTS_PER_SUB  = 100  # how many posts to fetch per sub
 REQUEST_DELAY  = 2    # seconds between Reddit API calls
 SPIKE_THRESHOLD = 2.0
 FALL_THRESHOLD  = 0.5
+SCAN_WINDOW_DAYS = 7  # how far back to look for posts
 
 BULLISH_WORDS = {"buy","bull","bullish","long","calls","moon","undervalued","growth","surge","rally","breakout","🚀","💎"}
 BEARISH_WORDS = {"sell","bear","bearish","short","puts","down","dump","crash","overvalued","bubble","decline","collapse","🩳"}
@@ -61,39 +62,68 @@ def sentiment_score(text: str) -> str:
     return "neutral"
 
 
-def fetch_subreddit_posts(subreddit: str, limit: int = 50) -> list[dict]:
-    """Fetch recent posts from a subreddit via public JSON API."""
+def fetch_subreddit_posts(subreddit: str, limit: int = 100) -> list[dict]:
+    """
+    Fetch posts from a subreddit via public JSON API.
+    Paginates through 'new' to cover SCAN_WINDOW_DAYS.
+    """
     posts = []
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=SCAN_WINDOW_DAYS)
+    seen_ids = set()
+    after = None
 
-    for sort in ["new", "hot"]:
+    for _ in range(3):  # up to 3 pages
         try:
-            url = f"https://www.reddit.com/r/{subreddit}/{sort}.json?limit={limit}"
+            url = f"https://www.reddit.com/r/{subreddit}/new.json?limit={min(limit,100)}"
+            if after:
+                url += f"&after={after}"
             r = requests.get(url, headers=HEADERS, timeout=15)
             if r.status_code == 429:
                 print(f"    [429] rate-limited on r/{subreddit}, skipping", file=sys.stderr)
                 break
             if r.status_code != 200:
-                continue
-            data = r.json().get("data", {}).get("children", [])
-            for child in data:
+                break
+
+            payload = r.json().get("data", {})
+            children = payload.get("children", [])
+            after = payload.get("after")
+
+            oldest_in_page = None
+            for child in children:
                 p = child.get("data", {})
+                pid = p.get("id", "")
+                if pid in seen_ids:
+                    continue
+                seen_ids.add(pid)
+
                 created = p.get("created_utc", 0)
                 post_time = datetime.fromtimestamp(created, tz=timezone.utc)
+                oldest_in_page = post_time
+
+                if post_time < cutoff:
+                    continue
+
                 posts.append({
-                    "subreddit":   subreddit,
-                    "title":       p.get("title", ""),
-                    "text":        p.get("selftext", "")[:500],
-                    "upvotes":     p.get("ups", 0),
-                    "comments":    p.get("num_comments", 0),
-                    "url":         f"https://reddit.com{p.get('permalink','')}",
-                    "age_h":       round((datetime.now(timezone.utc) - post_time).total_seconds() / 3600, 1),
-                    "post_time":   post_time,
+                    "subreddit": subreddit,
+                    "title":     p.get("title", ""),
+                    "text":      p.get("selftext", "")[:500],
+                    "upvotes":   p.get("ups", 0),
+                    "comments":  p.get("num_comments", 0),
+                    "url":       f"https://reddit.com{p.get('permalink','')}",
+                    "age_h":     round((datetime.now(timezone.utc) - post_time).total_seconds() / 3600, 1),
+                    "post_time": post_time,
                 })
+
             time.sleep(REQUEST_DELAY)
-            break  # new posts are enough; hot overlaps
+
+            # Stop paginating if we've gone past the cutoff or no more pages
+            if not after or (oldest_in_page and oldest_in_page < cutoff):
+                break
+
         except Exception as e:
             print(f"    [WARN] Failed r/{subreddit}: {e}", file=sys.stderr)
+            break
+
     return posts
 
 
