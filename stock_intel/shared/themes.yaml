@@ -1,0 +1,88 @@
+themes:
+
+  DRAM & Memory:
+    description: "Memory chip supply/demand dynamics"
+    keywords:
+      - "DRAM shortage"
+      - "HBM memory"
+      - "memory chip shortage"
+      - "DRAM price"
+      - "memory supply"
+    tickers: ["MU", "SNDK", "LRCX", "AMAT"]
+    tags: [semiconductors, memory]
+
+  AI Infrastructure:
+    description: "AI compute and chip demand"
+    keywords:
+      - "AI chip shortage"
+      - "GPU shortage"
+      - "AI data center"
+      - "inference chip"
+      - "AI compute demand"
+    tickers: ["NVDA", "AMD", "TSMC", "AMAT", "KLAC"]
+    tags: [semiconductors, AI]
+
+  Data Center Boom:
+    description: "Hyperscaler and colocation build-out"
+    keywords:
+      - "data center construction"
+      - "hyperscaler capex"
+      - "colocation demand"
+      - "data center land"
+      - "AWS data center"
+    tickers: ["EQIX", "DLR", "NVDA", "SMCI", "VRT"]
+    tags: [infrastructure, AI]
+
+  Power Grid & Energy:
+    description: "Grid capacity and energy infrastructure demand"
+    keywords:
+      - "transformer shortage"
+      - "power grid capacity"
+      - "grid interconnection"
+      - "electricity demand AI"
+      - "nuclear power data center"
+    tickers: ["GEV", "ETN", "VRT", "NEE", "VST"]
+    tags: [energy, infrastructure]
+
+  Semiconductor Supply Chain:
+    description: "Broad chip supply and fab capacity"
+    keywords:
+      - "chip shortage"
+      - "semiconductor shortage"
+      - "fab capacity"
+      - "TSMC capacity"
+      - "chip lead time"
+    tickers: ["NVDA", "AMD", "INTC", "TSMC", "AMAT", "LRCX"]
+    tags: [semiconductors]
+
+  AI Software & Models:
+    description: "AI model development and software demand"
+    keywords:
+      - "foundation model"
+      - "LLM training"
+      - "AI API demand"
+      - "AI software spending"
+      - "enterprise AI adoption"
+    tickers: ["MSFT", "GOOGL", "META", "AMZN", "ORCL"]
+    tags: [software, AI]
+
+  Cooling & Thermal:
+    description: "Liquid cooling and thermal management for AI hardware"
+    keywords:
+      - "liquid cooling data center"
+      - "thermal management AI"
+      - "immersion cooling"
+      - "data center cooling"
+    tickers: ["VRT", "SMCI", "CDNS"]
+    tags: [infrastructure, AI]
+
+  Networking & Interconnect:
+    description: "High-speed networking demand driven by AI"
+    keywords:
+      - "AI networking"
+      - "InfiniBand demand"
+      - "400G ethernet"
+      - "data center networking"
+      - "optical interconnect"
+    tickers: ["ANET", "CSCO", "MRVL", "NVDA"]
+    tags: [networking, AI]
