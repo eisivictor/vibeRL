@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from sources.price import get_price_data, format_market_cap
 from sources.news import get_news
 from sources.reddit import get_reddit_mentions
+from sources.trends import get_trends, format_trends_summary
 import config
 
 
@@ -29,7 +30,15 @@ def _price(val):
     return f"${val:.2f}"
 
 
-def generate_brief(ticker: str) -> str:
+def generate_brief(ticker: str, trends_data: dict = None) -> str:
+    """
+    Generate a formatted brief for a single ticker.
+
+    Args:
+        ticker: Stock ticker (e.g. "NVDA")
+        trends_data: Optional pre-fetched Google Trends dict (from get_trends).
+                     If None, fetches live. Pass False to skip entirely.
+    """
     lines = []
 
     # ── PRICE ──────────────────────────────────────────
@@ -99,9 +108,29 @@ def generate_brief(ticker: str) -> str:
             else:
                 lines.append(f"  {title}… r/{sub} ↑{upv} {sent} {age}h ago")
 
+    # ── GOOGLE TRENDS ──────────────────────────────────
+    if trends_data is not False:
+        if trends_data is None:
+            trends_data = get_trends(ticker)
+
+        lines.append(f"\n🔍 *Search Interest (Google Trends):*")
+        if trends_data.get("error"):
+            lines.append(f"• Unavailable")
+        else:
+            score = trends_data["interest_now"]
+            avg = trends_data["interest_avg"]
+            peak = trends_data["interest_peak"]
+            direction = trends_data["trend_direction"]
+            arrow_map = {"rising": "↑", "falling": "↓", "flat": "→"}
+            arrow = arrow_map.get(direction, "→")
+            lines.append(f"• Score: *{score}/100* {arrow}  |  7d avg: {avg}  |  Peak: {peak}")
+            if trends_data.get("related_queries"):
+                queries = ", ".join(trends_data["related_queries"][:3])
+                lines.append(f"• Rising searches: _{queries}_")
+
     # ── VERDICT ────────────────────────────────────────
     lines.append(f"\n🧠 *Quick Take:*")
-    verdict = _quick_take(p, reddit)
+    verdict = _quick_take(p, reddit, trends_data)
     lines.append(verdict)
 
     lines.append(f"\n_Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}_")
@@ -109,7 +138,7 @@ def generate_brief(ticker: str) -> str:
     return "\n".join(lines)
 
 
-def _quick_take(price_data: dict, reddit: dict) -> str:
+def _quick_take(price_data: dict, reddit: dict, trends_data: dict = None) -> str:
     notes = []
 
     chg = price_data.get("day_change_pct")
@@ -146,17 +175,42 @@ def _quick_take(price_data: dict, reddit: dict) -> str:
         except Exception:
             pass
 
+    # Trends signal
+    if trends_data and not trends_data.get("error"):
+        score = trends_data.get("interest_now", 0)
+        direction = trends_data.get("trend_direction", "flat")
+        if score >= 80 and direction == "rising":
+            notes.append("Google search interest surging — retail attention incoming")
+        elif score >= 60 and direction == "rising":
+            notes.append("search interest picking up")
+        elif score <= 20 and direction == "falling":
+            notes.append("search interest fading — low retail attention")
+
     if not notes:
         return "Nothing unusual — steady as she goes."
     return "; ".join(notes).capitalize() + "."
 
 
 def run_all_briefs() -> str:
+    from sources.trends import get_trends_multi
+    import time
+
     now = datetime.now(timezone.utc).strftime("%A, %B %-d %Y")
     header = f"📋 *Daily Stock Brief — {now}*\n"
     parts = [header]
+
+    # Batch-fetch Google Trends for all tickers at once
+    trends_map = {}
+    try:
+        trends_map = get_trends_multi(config.TICKERS)
+    except Exception:
+        pass
+
     for ticker in config.TICKERS:
-        parts.append(generate_brief(ticker))
+        td = trends_map.get(ticker)  # None if fetch failed
+        parts.append(generate_brief(ticker, trends_data=td))
+        time.sleep(1)  # small pause to avoid API rate limits
+
     return "\n\n".join(parts)
 
 
