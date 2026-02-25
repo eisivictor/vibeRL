@@ -22,7 +22,8 @@ import pandas as pd
 THEMES_PATH = os.path.join(os.path.dirname(__file__), "..", "shared", "themes.yaml")
 SPIKE_THRESHOLD = 1.5   # spike_factor >= this → rising signal
 FALL_THRESHOLD  = 0.7   # spike_factor <= this → falling
-PYTRENDS_DELAY  = 5     # seconds between API calls (avoid rate-limit)
+PYTRENDS_DELAY  = 15    # seconds between API calls (avoid rate-limit)
+PYTRENDS_RETRY  = 2     # retries on 429
 
 
 def load_themes() -> dict:
@@ -32,15 +33,21 @@ def load_themes() -> dict:
 
 def fetch_trend(pytrends: TrendReq, keyword: str) -> pd.Series | None:
     """Fetch 90-day weekly interest for a single keyword. Returns None on failure."""
-    try:
-        pytrends.build_payload([keyword], timeframe="today 3-m", geo="")
-        df = pytrends.interest_over_time()
-        if df.empty or keyword not in df.columns:
-            return None
-        return df[keyword]
-    except Exception as e:
-        print(f"  [WARN] Trends fetch failed for '{keyword}': {e}", file=sys.stderr)
-        return None
+    for attempt in range(PYTRENDS_RETRY + 1):
+        try:
+            pytrends.build_payload([keyword], timeframe="today 3-m", geo="")
+            df = pytrends.interest_over_time()
+            if df.empty or keyword not in df.columns:
+                return None
+            return df[keyword]
+        except Exception as e:
+            if "429" in str(e) and attempt < PYTRENDS_RETRY:
+                wait = PYTRENDS_DELAY * (attempt + 2)
+                print(f"  [429] rate-limited, retrying in {wait}s…", file=sys.stderr)
+                time.sleep(wait)
+            else:
+                print(f"  [WARN] Trends fetch failed for '{keyword}': {e}", file=sys.stderr)
+                return None
 
 
 def analyze_series(series: pd.Series) -> dict:
