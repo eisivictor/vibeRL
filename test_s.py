@@ -1,4 +1,3 @@
-import yfinance as yf
 import pandas as pd
 import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
@@ -9,14 +8,7 @@ import os
 import json
 import numpy as np
 from datetime import datetime, timedelta
-
-def download_data(ticker, start_date, end_date):
-    data = yf.download(ticker, start=start_date, end=end_date)
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.get_level_values(0)
-    data = data.reset_index()
-    data = data.dropna()
-    return data
+from data_utils import download_and_align
 
 def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=False, trace=False):
     # Load configuration
@@ -58,29 +50,11 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
         start_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
     
     print(f"Downloading test data for {ticker} from {start_date} to {end_date}...")
-    df = download_data(ticker, start_date, end_date)
-    
-    market_dfs = []
-    if market_tickers:
-        for mt in market_tickers:
-            print(f"Downloading market data for {mt} from {start_date} to {end_date}...")
-            try:
-                m_df = download_data(mt, start_date, end_date)
-                market_dfs.append(m_df)
-            except Exception as e:
-                print(f"Error downloading {mt}: {e}")
-        
-        # Align dataframes on Date
-        common_dates = df['Date']
-        for m_df in market_dfs:
-            common_dates = common_dates[common_dates.isin(m_df['Date'])]
-            
-        df = df[df['Date'].isin(common_dates)].reset_index(drop=True)
-        
-        aligned_market_dfs = []
-        for m_df in market_dfs:
-            aligned_market_dfs.append(m_df[m_df['Date'].isin(df['Date'])].reset_index(drop=True))
-        market_dfs = aligned_market_dfs
+    df, market_dfs = download_and_align(
+        ticker, start_date, end_date,
+        market_tickers=market_tickers,
+        inclusive_end=False,
+    )
 
     # 2. Load Model
     model_path = os.path.join("models", model_name)

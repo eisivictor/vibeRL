@@ -11,21 +11,10 @@ import shutil
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
-# Import PPO network configuration from train.py
-try:
-    import train
-    PPO_NETWORK_DEPTH = train.PPO_NETWORK_DEPTH
-    PPO_NETWORK_WIDTH_MULTIPLIER = train.PPO_NETWORK_WIDTH_MULTIPLIER
-    PPO_MIN_HIDDEN_DIM = train.PPO_MIN_HIDDEN_DIM
-    PPO_MAX_HIDDEN_DIM = train.PPO_MAX_HIDDEN_DIM
-    PPO_LSTM_HIDDEN_SIZE = train.PPO_LSTM_HIDDEN_SIZE
-except ImportError:
-    # Fallback defaults if train.py can't be imported
-    PPO_NETWORK_DEPTH = 3
-    PPO_NETWORK_WIDTH_MULTIPLIER = 2.0
-    PPO_MIN_HIDDEN_DIM = 64
-    PPO_MAX_HIDDEN_DIM = 512
-    PPO_LSTM_HIDDEN_SIZE = 128
+from model_config import (
+    PPO_NETWORK_DEPTH, PPO_NETWORK_WIDTH_MULTIPLIER,
+    PPO_MIN_HIDDEN_DIM, PPO_MAX_HIDDEN_DIM, PPO_LSTM_HIDDEN_SIZE,
+)
 
 # MY stocks
 DJIA_TICKERS = [

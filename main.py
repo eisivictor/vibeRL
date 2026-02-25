@@ -761,33 +761,12 @@ def main():
         print(f"Market tickers: {market_tickers}")
         
         # Download data for normalization period
-        from train import download_data
-        print(f"\nDownloading {ticker} from {args.norm_start_date} to {args.norm_end_date}...")
-        norm_df = download_data(ticker, args.norm_start_date, args.norm_end_date)
-        print(f"Downloaded {len(norm_df)} rows for {ticker}")
-        
-        norm_market_dfs = []
-        if market_tickers:
-            for mt in market_tickers:
-                print(f"Downloading market data {mt} from {args.norm_start_date} to {args.norm_end_date}...")
-                try:
-                    m_df = download_data(mt, args.norm_start_date, args.norm_end_date)
-                    print(f"Downloaded {len(m_df)} rows for {mt}")
-                    norm_market_dfs.append(m_df)
-                except Exception as e:
-                    print(f"Error downloading {mt}: {e}")
-            
-            # Align normalization data
-            common_dates = norm_df['Date']
-            for m_df in norm_market_dfs:
-                common_dates = common_dates[common_dates.isin(m_df['Date'])]
-            norm_df = norm_df[norm_df['Date'].isin(common_dates)].reset_index(drop=True)
-            aligned_norm_market_dfs = []
-            for m_df in norm_market_dfs:
-                aligned_norm_market_dfs.append(m_df[m_df['Date'].isin(norm_df['Date'])].reset_index(drop=True))
-            norm_market_dfs = aligned_norm_market_dfs
-        
-        print(f"Aligned normalization data shape: {norm_df.shape}")
+        from data_utils import download_and_align
+        print(f"\nDownloading normalization data...")
+        norm_df, norm_market_dfs = download_and_align(
+            ticker, args.norm_start_date, args.norm_end_date,
+            market_tickers=market_tickers,
+        )
         
         # Create temporary environment with normalization data
         from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize

@@ -1,4 +1,3 @@
-import yfinance as yf
 import pandas as pd
 import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
@@ -9,18 +8,7 @@ import os
 import json
 import numpy as np
 from datetime import datetime, timedelta
-
-def download_data(ticker, start_date, end_date):
-    # yfinance end parameter is exclusive, so add 1 day to include end_date
-    end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
-    end_date_inclusive = end_dt.strftime("%Y-%m-%d")
-    
-    data = yf.download(ticker, start=start_date, end=end_date_inclusive)
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.get_level_values(0)
-    data = data.reset_index()
-    data = data.dropna()
-    return data
+from data_utils import download_and_align
 
 def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=False, trace=False, _user_provided_dates=None, allow_norm_mismatch=False, initial_balance=None, mark_date=None, use_plotly=False, execution_model='close', debug=False):
     # Load configuration
@@ -233,56 +221,19 @@ def test(config_path, start_date=None, end_date=None, ticker=None, stochastic=Fa
     print(f"  - Normalization vector: {stats_path}")
     
     # 2. Download test period data with sufficient history for indicators
-    # Calculate how much historical data we need before start_date
-    # We need max(window_size, sma_length) + buffer for safety
     lookback_days = max(window_size, sma_length) + 20  # +20 buffer for weekends/holidays
-    
-    # Calculate extended start date for data download
-    test_start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-    download_start_dt = test_start_dt - timedelta(days=lookback_days)
-    download_start = download_start_dt.strftime("%Y-%m-%d")
-    
+
     print(f"\n--- Downloading Test Data ---")
     print(f"Test period: {start_date} to {end_date}")
-    print(f"Downloading from {download_start} (includes {lookback_days}-day lookback for indicators)")
-    print(f"Downloading {ticker} from {download_start} to {end_date}...")
-    df_full = download_data(ticker, download_start, end_date)
-    print(f"Downloaded {len(df_full)} rows for {ticker}")
-    
-    market_dfs_full = []
-    if market_tickers:
-        for mt in market_tickers:
-            print(f"Downloading market data {mt} from {download_start} to {end_date}...")
-            try:
-                m_df = download_data(mt, download_start, end_date)
-                print(f"Downloaded {len(m_df)} rows for {mt}")
-                market_dfs_full.append(m_df)
-            except Exception as e:
-                print(f"Error downloading {mt}: {e}")
-        
-        # Align dataframes on Date
-        common_dates = df_full['Date']
-        for m_df in market_dfs_full:
-            common_dates = common_dates[common_dates.isin(m_df['Date'])]
-        
-        df_full = df_full[df_full['Date'].isin(common_dates)].reset_index(drop=True)
-        aligned_market_dfs = []
-        for m_df in market_dfs_full:
-            aligned_market_dfs.append(m_df[m_df['Date'].isin(df_full['Date'])].reset_index(drop=True))
-        market_dfs_full = aligned_market_dfs
-        
-        print(f"Aligned full data shape: {df_full.shape}")
-        for i, m_df in enumerate(market_dfs_full):
-            print(f"Aligned test market data {market_tickers[i]} shape: {m_df.shape}")
-    else:
-        market_dfs_full = []
-    
+    print(f"Lookback: {lookback_days} days for indicators")
+    df_full, market_dfs_full = download_and_align(
+        ticker, start_date, end_date,
+        market_tickers=market_tickers,
+        lookback_days=lookback_days,
+    )
+
     # Find the index where the actual test period starts
-    # Reset df_full index to ensure we can use positional indexing
-    df_full = df_full.reset_index(drop=True)
-    if market_dfs_full:
-        market_dfs_full = [m_df.reset_index(drop=True) for m_df in market_dfs_full]
-    
+    test_start_dt = datetime.strptime(start_date, "%Y-%m-%d")
     test_start_idx = df_full[df_full['Date'] >= test_start_dt].index[0] if len(df_full[df_full['Date'] >= test_start_dt]) > 0 else 0
     print(f"Test period starts at row index {test_start_idx} (date: {df_full.iloc[test_start_idx]['Date'].date() if test_start_idx < len(df_full) else 'N/A'})")
 

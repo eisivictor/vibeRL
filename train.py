@@ -1,39 +1,20 @@
-import yfinance as yf
 import pandas as pd
 import os
 import json
 import numpy as np
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from stable_baselines3 import PPO
 from sb3_contrib import RecurrentPPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stock_env import StockTradingEnv
 from stable_baselines3.common.callbacks import BaseCallback
-
-# =============================================================================
-# PPO Model Architecture Configuration
-# Modify these values to control model complexity and size
-#
-# Examples:
-# - For simple/faster training: PPO_NETWORK_DEPTH = 2, PPO_NETWORK_WIDTH_MULTIPLIER = 1.0
-# - For complex/better performance: PPO_NETWORK_DEPTH = 4, PPO_NETWORK_WIDTH_MULTIPLIER = 3.0
-# - For memory-constrained: Reduce PPO_MAX_HIDDEN_DIM
-# =============================================================================
-
-# Network depth (number of hidden layers)
-PPO_NETWORK_DEPTH = 2  # Options: 2, 3, 4, 5
-
-# Network width multiplier (relative to observation dimension)
-PPO_NETWORK_WIDTH_MULTIPLIER = 1.5  # Options: 1.0, 1.5, 2.0, 3.0
-
-# Minimum and maximum hidden dimension sizes
-PPO_MIN_HIDDEN_DIM = 64
-PPO_MAX_HIDDEN_DIM = 512
-
-# LSTM hidden size for RecurrentPPO (only affects LSTM models)
-PPO_LSTM_HIDDEN_SIZE = 128
-
-# =============================================================================
+from model_config import (
+    PPO_NETWORK_DEPTH, PPO_NETWORK_WIDTH_MULTIPLIER,
+    PPO_MIN_HIDDEN_DIM, PPO_MAX_HIDDEN_DIM, PPO_LSTM_HIDDEN_SIZE,
+    compute_hidden_dim,
+)
+from data_utils import download_and_align
 
 class DebugValueCallback(BaseCallback):
     def __init__(self, verbose=0):
@@ -102,28 +83,119 @@ class DebugValueCallback(BaseCallback):
         #         print(f"   > Critic Value Estimate: {val:.4f}")
         return True
 
-def download_data(ticker, start_date, end_date):
-    # yfinance end parameter is exclusive, so add 1 day to include end_date
-    end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
-    end_date_inclusive = end_dt.strftime("%Y-%m-%d")
-    
-    data = yf.download(ticker, start=start_date, end=end_date_inclusive)
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.get_level_values(0)
-    data = data.reset_index()
-    # Ensure we have the 'Close' column and no missing values
-    if 'Close' not in data.columns:
-        raise ValueError("Data does not contain 'Close' price")
-    data = data.dropna()
-    return data
+def create_model(algorithm, env, network_depth, lstm_hidden_size, ent_coef, learning_rate):
+    """Create a new PPO or RecurrentPPO model with standard hyperparameters."""
+    obs_dim = env.observation_space.shape[0]
+    hidden_dim = compute_hidden_dim(obs_dim)
+    hidden_layers = [hidden_dim] * network_depth
 
-def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_date=None, continue_training=False, timesteps=10000, ticker="AAPL", custom_metadata_path=None, market_ticker=None, market_tickers=None, reward_metric='profit', ent_coef=0.01, sma_length=50, long_only=True, trading_fee_pct=0.0001, trace=False, normalization_start_date=None, normalization_end_date=None, load_normalization=False, initial_balance=10000, execution_model='next-open', algorithm='RecurrentPPO', learning_rate=3e-4, binary_action=False, network_depth=None, lstm_hidden_size=None, drawdown_penalty=0.0):
+    policy_kwargs = dict(
+        net_arch=dict(pi=hidden_layers, vf=hidden_layers),
+    )
+
+    shared_kwargs = dict(
+        env=env,
+        policy_kwargs=policy_kwargs,
+        verbose=1,
+        ent_coef=ent_coef,
+        learning_rate=learning_rate,
+        n_steps=2048,
+        batch_size=64,
+        n_epochs=10,
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_range=0.2,
+        max_grad_norm=0.5,
+        vf_coef=0.5,
+    )
+
+    if algorithm == "RecurrentPPO":
+        policy_kwargs["lstm_hidden_size"] = lstm_hidden_size
+        policy_kwargs["enable_critic_lstm"] = True
+        print(f"Network Architecture: Input Dim={obs_dim} -> [Pi/Vf: {hidden_layers}, LSTM: {lstm_hidden_size}] (RecurrentPPO)")
+        model = RecurrentPPO("MlpLstmPolicy", **shared_kwargs)
+    else:
+        print(f"Network Architecture: Input Dim={obs_dim} -> [Pi/Vf: {hidden_layers}] (MLP)")
+        model = PPO("MlpPolicy", **shared_kwargs)
+
+    return model
+
+
+@dataclass
+class TrainConfig:
+    """All parameters for a training run."""
+    window_size: int = 5
+    model_name: str = "ppo_stock_trader"
+    start_date: str = None
+    end_date: str = None
+    continue_training: bool = False
+    timesteps: int = 10000
+    ticker: str = "AAPL"
+    custom_metadata_path: str = None
+    market_ticker: str = None
+    market_tickers: list = None
+    reward_metric: str = 'profit'
+    ent_coef: float = 0.01
+    sma_length: int = 50
+    long_only: bool = True
+    trading_fee_pct: float = 0.0001
+    trace: bool = False
+    normalization_start_date: str = None
+    normalization_end_date: str = None
+    load_normalization: bool = False
+    initial_balance: float = 10000
+    execution_model: str = 'next-open'
+    algorithm: str = 'RecurrentPPO'
+    learning_rate: float = 3e-4
+    binary_action: bool = False
+    network_depth: int = None
+    lstm_hidden_size: int = None
+    drawdown_penalty: float = 0.0
+
+
+def train(config=None, **kwargs):
+    """Train a PPO/RecurrentPPO model.
+
+    Accepts either a TrainConfig object or keyword arguments (for backward
+    compatibility with existing call sites in main.py).
+    """
+    if config is None:
+        config = TrainConfig(**kwargs)
+
+    # Unpack for readability — keeps the diff minimal for the rest of the function
+    window_size = config.window_size
+    model_name = config.model_name
+    start_date = config.start_date
+    end_date = config.end_date
+    continue_training = config.continue_training
+    timesteps = config.timesteps
+    ticker = config.ticker
+    custom_metadata_path = config.custom_metadata_path
+    market_ticker = config.market_ticker
+    market_tickers = config.market_tickers
+    reward_metric = config.reward_metric
+    ent_coef = config.ent_coef
+    sma_length = config.sma_length
+    long_only = config.long_only
+    trading_fee_pct = config.trading_fee_pct
+    trace = config.trace
+    normalization_start_date = config.normalization_start_date
+    normalization_end_date = config.normalization_end_date
+    initial_balance = config.initial_balance
+    execution_model = config.execution_model
+    algorithm = config.algorithm
+    learning_rate = config.learning_rate
+    binary_action = config.binary_action
+    network_depth = config.network_depth
+    lstm_hidden_size = config.lstm_hidden_size
+    drawdown_penalty = config.drawdown_penalty
+
     # 1. Validate normalization requirements
-    
+
     # Use provided network_depth or fall back to global default
     if network_depth is None:
         network_depth = PPO_NETWORK_DEPTH
-    
+
     # Use provided lstm_hidden_size or fall back to global default
     if lstm_hidden_size is None:
         lstm_hidden_size = PPO_LSTM_HIDDEN_SIZE
@@ -149,7 +221,6 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
         )
     
     # Validate that normalization period contains training period
-    from datetime import datetime
     norm_start = datetime.strptime(normalization_start_date, "%Y-%m-%d")
     norm_end = datetime.strptime(normalization_end_date, "%Y-%m-%d")
     train_start = datetime.strptime(start_date, "%Y-%m-%d")
@@ -170,63 +241,27 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
     print(f"  - Normalization vector: {stats_path}")
     
     # 2. Prepare Data
-    
+
     # Handle market tickers
     target_tickers = []
     if market_tickers:
         target_tickers = market_tickers
     elif market_ticker:
         target_tickers = [market_ticker]
-    
-    # Calculate how much historical data we need before start_date for indicators
+
     lookback_days = max(window_size, sma_length) + 20  # +20 buffer for weekends/holidays
-    
-    # Calculate extended start date for data download
-    train_start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-    download_start_dt = train_start_dt - timedelta(days=lookback_days)
-    download_start = download_start_dt.strftime("%Y-%m-%d")
-    
-    # Download training data with sufficient history for indicators
+
     print(f"\n--- Downloading Training Data ---")
     print(f"Training period: {start_date} to {end_date}")
-    print(f"Downloading from {download_start} (includes {lookback_days}-day lookback for indicators)")
-    print(f"Downloading {ticker} from {download_start} to {end_date}...")
-    df_full = download_data(ticker, download_start, end_date)
-    print(f"Downloaded {len(df_full)} rows for {ticker}")
-    
-    market_dfs_full = []
-    if target_tickers:
-        for mt in target_tickers:
-            print(f"Downloading market data {mt} from {download_start} to {end_date}...")
-            try:
-                m_df = download_data(mt, download_start, end_date)
-                print(f"Downloaded {len(m_df)} rows for {mt}")
-                market_dfs_full.append(m_df)
-            except Exception as e:
-                print(f"Error downloading {mt}: {e}")
-        
-        # Align dataframes on Date
-        common_dates = df_full['Date']
-        for m_df in market_dfs_full:
-            common_dates = common_dates[common_dates.isin(m_df['Date'])]
-            
-        df_full = df_full[df_full['Date'].isin(common_dates)].reset_index(drop=True)
-        aligned_market_dfs = []
-        for m_df in market_dfs_full:
-            aligned_market_dfs.append(m_df[m_df['Date'].isin(df_full['Date'])].reset_index(drop=True))
-        market_dfs_full = aligned_market_dfs
-        
-        print(f"Aligned full data shape: {df_full.shape}")
-        for i, m_df in enumerate(market_dfs_full):
-            print(f"Aligned Market Data {target_tickers[i]} shape: {m_df.shape}")
-    else:
-        market_dfs_full = []
-    
+    print(f"Lookback: {lookback_days} days for indicators")
+    df_full, market_dfs_full = download_and_align(
+        ticker, start_date, end_date,
+        market_tickers=target_tickers,
+        lookback_days=lookback_days,
+    )
+
     # Find the index where the actual training period starts
-    df_full = df_full.reset_index(drop=True)
-    if market_dfs_full:
-        market_dfs_full = [m_df.reset_index(drop=True) for m_df in market_dfs_full]
-    
+    train_start_dt = datetime.strptime(start_date, "%Y-%m-%d")
     train_start_idx = df_full[df_full['Date'] >= train_start_dt].index[0] if len(df_full[df_full['Date'] >= train_start_dt]) > 0 else 0
     print(f"Training starts at row index {train_start_idx} (date: {df_full.iloc[train_start_idx]['Date'].date() if train_start_idx < len(df_full) else 'N/A'})")
 
@@ -265,8 +300,6 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
     print(f"✓ Loaded normalization stats (FROZEN). Obs Mean (first 5): {env.obs_rms.mean[:5]}")
     print(f"✓ Loaded normalization stats (FROZEN). Obs Var (first 5): {env.obs_rms.var[:5]}")
     print("-------------------------------------------\n")
-    
-    use_frozen_norm_stats = True
 
     # 3. Initialize PPO Agent
     models_dir = "models"
@@ -343,13 +376,11 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
             
             # Print network architecture
             obs_dim = env.observation_space.shape[0]
+            hidden_dim = compute_hidden_dim(obs_dim)
+            hidden_layers = [hidden_dim] * network_depth
             if algorithm == "RecurrentPPO":
-                hidden_dim = max(PPO_MIN_HIDDEN_DIM, min(PPO_MAX_HIDDEN_DIM, int(obs_dim * PPO_NETWORK_WIDTH_MULTIPLIER)))
-                hidden_layers = [hidden_dim] * network_depth
                 print(f"Network Architecture: Input Dim={obs_dim} -> [Pi/Vf: {hidden_layers}, LSTM: {lstm_hidden_size}] (RecurrentPPO)")
             else:  # PPO
-                hidden_dim = max(PPO_MIN_HIDDEN_DIM, min(PPO_MAX_HIDDEN_DIM, int(obs_dim * PPO_NETWORK_WIDTH_MULTIPLIER)))
-                hidden_layers = [hidden_dim] * network_depth
                 print(f"Network Architecture: Input Dim={obs_dim} -> [Pi/Vf: {hidden_layers}] (MLP)")
             
             # Try to update optimizer learning rate if it changed
@@ -366,8 +397,8 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
             print(f"Model entropy coef: {model.ent_coef}")
             print(f"Model learning rate: {model.learning_rate}")
             print(f"Optimizer learning rate: {model.policy.optimizer.param_groups[0]['lr']}")
-        except:
-            print(f"Failed to load as {algorithm}, trying alternative...")
+        except Exception as e:
+            print(f"Failed to load as {algorithm}: {e}. Trying alternative...")
             if algorithm == "RecurrentPPO":
                 model = PPO.load(model_path + ".zip", env=env)
             else:
@@ -376,73 +407,8 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
             
         reset_num_timesteps = False
     else:
-        print(f"Creating new {algorithm} model with ent_coef={ent_coef}...")
-        
-        if algorithm == "RecurrentPPO":
-            # Dynamic network sizing based on input dimension
-            obs_dim = env.observation_space.shape[0]
-            
-            # Use configurable network architecture
-            hidden_dim = max(PPO_MIN_HIDDEN_DIM, min(PPO_MAX_HIDDEN_DIM, int(obs_dim * PPO_NETWORK_WIDTH_MULTIPLIER)))
-            
-            # Create network architecture based on depth
-            hidden_layers = [hidden_dim] * network_depth
-            
-            print(f"Network Architecture: Input Dim={obs_dim} -> [Pi/Vf: {hidden_layers}, LSTM: {lstm_hidden_size}] (RecurrentPPO)")
-            
-            policy_kwargs = dict(
-                net_arch=dict(pi=hidden_layers, vf=hidden_layers),
-                lstm_hidden_size=lstm_hidden_size,
-                enable_critic_lstm=True,  # Use LSTM for critic too
-            )
-            
-            model = RecurrentPPO(
-                "MlpLstmPolicy", 
-                env, 
-                policy_kwargs=policy_kwargs, 
-                verbose=1,
-                ent_coef=ent_coef,  # Encourage exploration
-                learning_rate=learning_rate,
-                n_steps=2048,  # Increase rollout length for better generalization
-                batch_size=64,  # Smaller batch size for more gradient updates
-                n_epochs=10,  # Multiple passes over data
-                gamma=0.99,  # Discount factor
-                gae_lambda=0.95,  # GAE parameter
-                clip_range=0.2,  # PPO clipping
-                max_grad_norm=0.5,  # Gradient clipping to prevent exploding gradients
-                vf_coef=0.5,  # Value function coefficient
-            )
-        else:  # algorithm == "PPO"
-            # Use configurable network architecture
-            obs_dim = env.observation_space.shape[0]
-            hidden_dim = max(PPO_MIN_HIDDEN_DIM, min(PPO_MAX_HIDDEN_DIM, int(obs_dim * PPO_NETWORK_WIDTH_MULTIPLIER)))
-            
-            # Create network architecture based on depth
-            hidden_layers = [hidden_dim] * network_depth
-            
-            print(f"Network Architecture: Input Dim={obs_dim} -> [Pi/Vf: {hidden_layers}] (MLP)")
-            
-            policy_kwargs = dict(
-                net_arch=dict(pi=hidden_layers, vf=hidden_layers),
-            )
-            
-            model = PPO(
-                "MlpPolicy", 
-                env, 
-                policy_kwargs=policy_kwargs, 
-                verbose=1,
-                ent_coef=ent_coef,  # Encourage exploration
-                learning_rate=learning_rate,
-                n_steps=2048,  # Increase rollout length for better generalization
-                batch_size=64,  # Smaller batch size for more gradient updates
-                n_epochs=10,  # Multiple passes over data
-                gamma=0.99,  # Discount factor
-                gae_lambda=0.95,  # GAE parameter
-                clip_range=0.2,  # PPO clipping
-                max_grad_norm=0.5,  # Gradient clipping to prevent exploding gradients
-                vf_coef=0.5,  # Value function coefficient
-            )
-        
+        model = create_model(algorithm, env, network_depth, lstm_hidden_size,
+                             ent_coef, learning_rate)
         reset_num_timesteps = True
 
     # 4. Train
@@ -461,14 +427,9 @@ def train(window_size=5, model_name="ppo_stock_trader", start_date=None, end_dat
     model.save(model_path)
     print(f"Model saved to {model_path}")
     
-    # Save normalization stats only if newly generated (not frozen)
     stats_filename = f"{model_name}_vecnormalize.pkl"
     stats_path = os.path.join(models_dir, stats_filename)
-    if not use_frozen_norm_stats:
-        env.save(stats_path)
-        print(f"Normalization stats saved to {stats_path}")
-    else:
-        print(f"Normalization stats kept frozen (not overwritten)")
+    print(f"Normalization stats kept frozen (not overwritten)")
 
     # 6. Save Metadata
     metadata = {

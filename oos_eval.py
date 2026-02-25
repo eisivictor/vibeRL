@@ -174,7 +174,8 @@ def _build_test_cmd(config_path, fold, args):
 # Per-fold execution
 # ---------------------------------------------------------------------------
 
-def run_fold(fold, args, out_dir, run_id, dry_run=False):
+def run_fold(fold, args, out_dir, run_id, dry_run=False,
+             skip_train=False, pretrained_zip=None):
     """Normalize -> Train -> Test for a single fold.
 
     Returns (success: bool, trace_dest: str | None).
@@ -199,7 +200,13 @@ def run_fold(fold, args, out_dir, run_id, dry_run=False):
         print(f"  Train: {fold['train_start']} -> {fold['train_end']}")
         print(f"  Test:  {fold['test_start']} -> {fold['test_end']}")
         print(f"\n  [NORMALIZE] {' '.join(norm_cmd)}")
-        print(f"\n  [TRAIN]     {' '.join(train_cmd)}")
+        if skip_train:
+            print(f"\n  [TRAIN]     SKIPPED")
+            if pretrained_zip:
+                fold_zip = f"models/{model_name}.zip"
+                print(f"  [COPY MODEL] {pretrained_zip} -> {fold_zip}")
+        else:
+            print(f"\n  [TRAIN]     {' '.join(train_cmd)}")
         print(f"\n  [TEST]      {' '.join(test_cmd)}")
         return True, None
 
@@ -212,9 +219,20 @@ def run_fold(fold, args, out_dir, run_id, dry_run=False):
     if not run_command(norm_cmd, f"{fold_label} - Normalize ({fold['train_start']} to {fold['train_end']})"):
         return False, None
 
-    # 2. Train
-    if not run_command(train_cmd, f"{fold_label} - Train ({args.timesteps:,} steps)"):
-        return False, None
+    # 2. Train (or skip)
+    if skip_train:
+        fold_zip = f"models/{model_name}.zip"
+        if pretrained_zip:
+            shutil.copy2(pretrained_zip, fold_zip)
+            print(f"\u2713 Copied pre-trained model to {fold_zip}")
+        else:
+            if not os.path.exists(fold_zip):
+                print(f"\u2717 No model found at {fold_zip} (use --pretrained-config or train first)")
+                return False, None
+            print(f"\u2713 Skipping training, using existing model at {fold_zip}")
+    else:
+        if not run_command(train_cmd, f"{fold_label} - Train ({args.timesteps:,} steps)"):
+            return False, None
 
     # 3. Test (OOS)
     if not run_command(test_cmd, f"{fold_label} - Test OOS ({fold['test_start']} to {fold['test_end']})"):
@@ -704,6 +722,12 @@ def main():
     parser.add_argument("--norm-warmup-steps", type=int, default=10000,
                         help="Normalization warmup steps per fold (default: 10000)")
 
+    # Pre-trained / skip-train
+    parser.add_argument("--pretrained-config", type=str, default=None,
+                        help="Path to existing model config (reuse weights, renormalize per fold)")
+    parser.add_argument("--skip-train", action="store_true",
+                        help="Skip training step (use with --pretrained-config or existing fold models)")
+
     # Output control
     parser.add_argument("--keep-models", action="store_true",
                         help="Retain per-fold model files (default: clean up)")
@@ -715,6 +739,42 @@ def main():
                         help="Also generate interactive HTML chart")
 
     args = parser.parse_args()
+
+    # ------------------------------------------------------------------
+    # Validate pretrained-config / skip-train
+    # ------------------------------------------------------------------
+    pretrained_zip = None
+    if args.pretrained_config:
+        # Resolve config path (with or without extension)
+        cfg_path = args.pretrained_config
+        if not os.path.exists(cfg_path):
+            # Try common variants
+            for ext in [".json", ""]:
+                candidate = cfg_path + ext
+                if os.path.exists(candidate):
+                    cfg_path = candidate
+                    break
+
+        if not os.path.exists(cfg_path):
+            print(f"Error: pretrained config not found: {args.pretrained_config}")
+            return 1
+
+        # Load config to derive model zip path
+        with open(cfg_path, "r") as f:
+            pretrained_cfg = json.load(f)
+
+        pt_model_name = pretrained_cfg.get("model_name")
+        if not pt_model_name:
+            print(f"Error: pretrained config has no 'model_name' key: {cfg_path}")
+            return 1
+
+        pretrained_zip = f"models/{pt_model_name}.zip"
+        if not os.path.exists(pretrained_zip):
+            print(f"Error: pretrained model zip not found: {pretrained_zip}")
+            return 1
+
+        # Imply skip_train
+        args.skip_train = True
 
     # ------------------------------------------------------------------
     # 1. Generate folds
@@ -774,6 +834,10 @@ def main():
     print(f"Algorithm:         {args.algorithm}")
     print(f"Timesteps/fold:    {args.timesteps:,}")
     print(f"Budget:            ${args.budget:,.0f}")
+    if pretrained_zip:
+        print(f"Pretrained model:  {pretrained_zip}")
+    if args.skip_train:
+        print(f"Skip training:     yes")
     print(f"Output dir:        {out_dir}")
 
     for fold in folds:
@@ -800,7 +864,9 @@ def main():
         model_names.append(model_name)
 
         success, trace_path = run_fold(fold, args, out_dir, run_id,
-                                       dry_run=args.dry_run)
+                                       dry_run=args.dry_run,
+                                       skip_train=args.skip_train,
+                                       pretrained_zip=pretrained_zip)
 
         if success and trace_path:
             completed_traces.append(trace_path)
